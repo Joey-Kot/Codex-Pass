@@ -1,8 +1,8 @@
 # codex-pass
 
-`codex-pass` 是一个仅使用 Go 标准库的 Codex Responses API 本地透明代理。它只提供 `POST /v1/responses` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
+`codex-pass` 是一个仅使用 Go 标准库的 Codex Responses API 本地代理。它提供 `POST /v1/responses`、`POST /v1/chat/completions` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
 
-设计目标是可审计的转发：流式请求和 SSE 内容按字节转发；非流式请求只把顶层 `stream` 改为 `true`，随后从 SSE 中提取 `response.completed.response`。当前有五类显式兼容改写：字符串 `input` 包装为官方 Codex 使用的用户消息列表，顶层 `service_tier: "fast"` 映射为 `"priority"`，顶层 `store` 强制为布尔值 `false`，顶层 `temperature` 和 `prompt_cache_options` 会被删除，并删除任意嵌套位置的 `prompt_cache_breakpoint`。所有改写都会记录在 Debug 字段差异中；其他上游参数错误会原样返回，不会通过删除字段、改模型名或注入工具来“兼容”。
+`/v1/responses` 的设计目标是可审计的转发：流式请求和 SSE 内容按字节转发；非流式请求只把顶层 `stream` 改为 `true`，随后从 SSE 中提取 `response.completed.response`。`/v1/chat/completions` 会将 Chat 请求的 `messages` 转为 Responses `input`，再将上游 Responses 结果转为 Chat Completion：流式请求输出 Chat Completion SSE 块并以 `[DONE]` 结束，非流式请求输出一个 `chat.completion` JSON 对象。当前有五类显式兼容改写：字符串 `input` 包装为官方 Codex 使用的用户消息列表，顶层 `service_tier: "fast"` 映射为 `"priority"`，顶层 `store` 强制为布尔值 `false`，顶层 `temperature` 和 `prompt_cache_options` 会被删除，并删除任意嵌套位置的 `prompt_cache_breakpoint`。所有改写都会记录在 Debug 字段差异中；其他上游参数错误会原样返回，不会通过删除字段、改模型名或注入工具来“兼容”。
 
 ## 构建与测试
 
@@ -64,6 +64,20 @@ curl http://127.0.0.1:8317/v1/responses \
 
 如果省略 `stream`，代理同样执行非流式聚合。流式请求不会解析、重排或重写上游 SSE；当 `input` 为字符串时，代理将其包装成 `[ { "type": "message", "role": "user", "content": [ { "type": "input_text", "text": "…" } ] } ]`。当 `service_tier` 为 `fast`、`store` 缺失或不为布尔 `false`、顶层出现 `temperature` 或 `prompt_cache_options`、或任意对象含 `prompt_cache_breakpoint` 时，代理也会重编码请求 JSON，执行对应改写，因此这些特例不保持请求体字节一致。`prompt_cache_key` 不受影响。非流式请求会处理多行 `data:`、`\r\n`、keepalive、任意 TCP 分块和大事件，且不使用 `bufio.Scanner`。
 
+Chat Completions 请求示例：
+
+```bash
+curl http://127.0.0.1:8317/v1/chat/completions \
+  -H 'Authorization: Bearer sk-local-secret' \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "model":"gpt-6-luna",
+    "messages":[{"role":"user","content":"Hello"}]
+  }'
+```
+
+在相同请求中设置 `"stream": true` 可获得 `text/event-stream` 格式的 Chat Completion 块。`stream_options.include_usage: true` 会在结束块后、`[DONE]` 前增加一个空 `choices` 且带 `usage` 的标准 Usage 块。Chat 输入支持 `system`、`developer`、`user`、`assistant`、`tool` 消息，文本、图片、音频内容块和函数调用；`n` 仅支持 `1`。输出会拼接 Responses 的 `output_text`，并将 `function_call` 映射为 Chat 的 `tool_calls`。
+
 ## 上游认证与亲和性
 
 上游固定为 `https://chatgpt.com/backend-api/codex/responses`。代理替换客户端的 `Authorization` 和 `ChatGPT-Account-ID`，并保留客户端显式提供的 `session-id`、`thread-id`、`originator` 等非认证头。没有显式 `session-id` 时，若请求包含字符串 `prompt_cache_key`，代理将该值作为上游 `session-id`。
@@ -119,4 +133,4 @@ scripts/probe_fast.sh \
 
 ## 范围
 
-未提供 Web 管理面板、数据库、用户系统、Chat Completions 转换、模型映射、参数修复、请求内容缓存、负载均衡或 WebSocket。非流式 SSE 未出现 `response.completed` 时，代理返回明确的 502 聚合失败，不会伪造成功结果。
+未提供 Web 管理面板、数据库、用户系统、模型映射、参数修复、请求内容缓存、负载均衡或 WebSocket。非流式 SSE 未出现 `response.completed` 时，代理返回明确的 502 聚合失败，不会伪造成功结果。

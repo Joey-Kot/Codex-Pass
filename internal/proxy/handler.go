@@ -94,6 +94,12 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+	case "/v1/chat/completions":
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 	default:
 		writeError(writer, http.StatusNotFound, "not found")
 		return
@@ -105,6 +111,10 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	if s.logger != nil && s.logger.Err() != nil {
 		writeError(writer, http.StatusInternalServerError, "debug logger is unavailable")
+		return
+	}
+	if request.URL.Path == "/v1/chat/completions" {
+		s.handleChatCompletions(writer, request)
 		return
 	}
 	s.handleResponses(writer, request)
