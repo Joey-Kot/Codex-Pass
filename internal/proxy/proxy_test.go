@@ -111,6 +111,36 @@ func TestStreamingFastServiceTierMapsToPriorityAndLogsDiff(t *testing.T) {
 	}
 }
 
+func TestStreamingWrapsStringInputAndLogsDiff(t *testing.T) {
+	requestBody := []byte(`{"model":"gpt-6-luna","stream":true,"store":false,"input":"ping"}`)
+	var received []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		received, _ = io.ReadAll(request.Body)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_input\",\"status\":\"completed\",\"output\":[],\"usage\":{}}}\n\n"))
+	}))
+	defer upstream.Close()
+	logPath := filepath.Join(t.TempDir(), "proxy.jsonl")
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", logPath)
+	response := post(t, proxyServer, requestBody)
+	defer response.Body.Close()
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	assertStringInputWrappedAndFieldsPreserved(t, requestBody, received)
+	cleanup()
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(logData, []byte(`"path":"$.input","before":"ping"`)) {
+		t.Fatalf("string input conversion was not logged: %s", logData)
+	}
+}
+
 func TestStreamingForcesStoreFalseAndLogsDiff(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -502,6 +532,28 @@ func assertOnlyServiceTierChanged(t *testing.T, before, after []byte) {
 	original["service_tier"] = "priority"
 	if !reflect.DeepEqual(original, upstream) {
 		t.Fatalf("fast tier mapping changed more than service_tier\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func assertStringInputWrappedAndFieldsPreserved(t *testing.T, before, after []byte) {
+	t.Helper()
+	var original, upstream map[string]any
+	if err := json.Unmarshal(before, &original); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(after, &upstream); err != nil {
+		t.Fatal(err)
+	}
+	original["input"] = []any{map[string]any{
+		"type": "message",
+		"role": "user",
+		"content": []any{map[string]any{
+			"type": "input_text",
+			"text": "ping",
+		}},
+	}}
+	if !reflect.DeepEqual(original, upstream) {
+		t.Fatalf("string input conversion changed other fields\nbefore=%s\nafter=%s", before, after)
 	}
 }
 

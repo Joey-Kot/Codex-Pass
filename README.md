@@ -2,7 +2,7 @@
 
 `codex-pass` 是一个仅使用 Go 标准库的 Codex Responses API 本地透明代理。它只提供 `POST /v1/responses` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
 
-设计目标是可审计的转发：流式请求和 SSE 内容按字节转发；非流式请求只把顶层 `stream` 改为 `true`，随后从 SSE 中提取 `response.completed.response`。当前有四类显式兼容改写：顶层 `service_tier: "fast"` 映射为 `"priority"`，顶层 `store` 强制为布尔值 `false`，顶层 `temperature` 和 `prompt_cache_options` 会被删除，并删除任意嵌套位置的 `prompt_cache_breakpoint`。所有改写都会记录在 Debug 字段差异中；其他上游参数错误会原样返回，不会通过删除字段、改模型名或注入工具来“兼容”。
+设计目标是可审计的转发：流式请求和 SSE 内容按字节转发；非流式请求只把顶层 `stream` 改为 `true`，随后从 SSE 中提取 `response.completed.response`。当前有五类显式兼容改写：字符串 `input` 包装为官方 Codex 使用的用户消息列表，顶层 `service_tier: "fast"` 映射为 `"priority"`，顶层 `store` 强制为布尔值 `false`，顶层 `temperature` 和 `prompt_cache_options` 会被删除，并删除任意嵌套位置的 `prompt_cache_breakpoint`。所有改写都会记录在 Debug 字段差异中；其他上游参数错误会原样返回，不会通过删除字段、改模型名或注入工具来“兼容”。
 
 ## 构建与测试
 
@@ -62,7 +62,7 @@ curl http://127.0.0.1:8317/v1/responses \
   --data '{"model":"gpt-6-luna","stream":false,"input":"Hello"}'
 ```
 
-如果省略 `stream`，代理同样执行非流式聚合。流式请求不会解析、重排或重写上游 SSE；当 `service_tier` 为 `fast`、`store` 缺失或不为布尔 `false`、顶层出现 `temperature` 或 `prompt_cache_options`、或任意对象含 `prompt_cache_breakpoint` 时，代理会重编码请求 JSON，将它们分别改为 `priority`、`false`、删除对应字段，因此这些特例不保持请求体字节一致。`prompt_cache_key` 不受影响。非流式请求会处理多行 `data:`、`\r\n`、keepalive、任意 TCP 分块和大事件，且不使用 `bufio.Scanner`。
+如果省略 `stream`，代理同样执行非流式聚合。流式请求不会解析、重排或重写上游 SSE；当 `input` 为字符串时，代理将其包装成 `[ { "type": "message", "role": "user", "content": [ { "type": "input_text", "text": "…" } ] } ]`。当 `service_tier` 为 `fast`、`store` 缺失或不为布尔 `false`、顶层出现 `temperature` 或 `prompt_cache_options`、或任意对象含 `prompt_cache_breakpoint` 时，代理也会重编码请求 JSON，执行对应改写，因此这些特例不保持请求体字节一致。`prompt_cache_key` 不受影响。非流式请求会处理多行 `data:`、`\r\n`、keepalive、任意 TCP 分块和大事件，且不使用 `bufio.Scanner`。
 
 ## 上游认证与亲和性
 

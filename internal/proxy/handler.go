@@ -416,6 +416,27 @@ func prepareBody(body []byte) (stream bool, upstream []byte, promptCacheKey stri
 			return false, nil, "", errors.New("top-level stream must be a JSON boolean")
 		}
 	}
+	inputWrapped := false
+	if rawInput, found := object["input"]; found {
+		var inputText string
+		if json.Unmarshal(rawInput, &inputText) == nil {
+			wrapped, wrapErr := json.Marshal([]any{map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{map[string]string{
+					"type": "input_text",
+					"text": inputText,
+				}},
+			}})
+			if wrapErr != nil {
+				return false, nil, "", fmt.Errorf("wrap string input: %w", wrapErr)
+			}
+			// Codex's upstream endpoint requires an input item list. This is the
+			// canonical user-message shape emitted by the official Codex client.
+			object["input"] = wrapped
+			inputWrapped = true
+		}
+	}
 	fastTierMapped := false
 	if rawTier, found := object["service_tier"]; found {
 		var tier string
@@ -464,7 +485,7 @@ func prepareBody(body []byte) (stream bool, upstream []byte, promptCacheKey stri
 			cacheBreakpointsRemoved = true
 		}
 	}
-	if stream && !fastTierMapped && !storeForced && !temperatureRemoved && !cacheOptionsRemoved && !cacheBreakpointsRemoved {
+	if stream && !inputWrapped && !fastTierMapped && !storeForced && !temperatureRemoved && !cacheOptionsRemoved && !cacheBreakpointsRemoved {
 		return true, append([]byte(nil), body...), promptCacheKey, nil
 	}
 	if !stream {
