@@ -1,0 +1,5 @@
+: keepalive
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":1}}}
+

@@ -1,0 +1,33 @@
+# Build outputs
+/codex-pass
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go tooling
+/coverage.out
+/cover.out
+/cpu.pprof
+/mem.pprof
+
+# Local diagnostics
+*.log
+*.jsonl
+/proxy.jsonl
+
+# Local OAuth credential copies. Keep testdata/mock_auth.json tracked.
+/auth.json
+/.auth/
+*.auth.json
+
+# Editor, OS, and temporary files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+tmp/
+Temp-Scrape/

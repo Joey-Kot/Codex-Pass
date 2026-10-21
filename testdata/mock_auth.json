@@ -1,0 +1,8 @@
+{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "test-access",
+    "refresh_token": "test-refresh",
+    "account_id": "test-account"
+  }
+}
