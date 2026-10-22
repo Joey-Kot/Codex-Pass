@@ -103,6 +103,50 @@ func TestFormatNumber(t *testing.T) {
 	}
 }
 
+func TestFormatHumanNumber(t *testing.T) {
+	tests := map[int64]string{
+		-1234567:   "-1.23M",
+		0:          "0",
+		999:        "999",
+		1000:       "1K",
+		1270:       "1.27K",
+		2410000:    "2.41M",
+		2340000000: "2.34B",
+		999999:     "1M",
+	}
+	for input, want := range tests {
+		if got := formatHumanNumber(input); got != want {
+			t.Errorf("formatHumanNumber(%d) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestPrintSummaryWithHumanReadableNumbers(t *testing.T) {
+	summary := requestlog.Summary{
+		Total: requestlog.Aggregate{
+			Requests:         1270,
+			Successes:        1270,
+			InputTokens:      2410000,
+			CacheWriteTokens: 1270,
+			CacheReadTokens:  2340000000,
+			OutputTokens:     1000,
+			ReasoningTokens:  999,
+		},
+	}
+
+	var output bytes.Buffer
+	printSummaryWithOptions(&output, "all", summary, true)
+	got := output.String()
+	for _, value := range []string{"1.27K", "2.41M", "2.34B", "1K"} {
+		if !strings.Contains(got, value) {
+			t.Errorf("human-readable summary does not contain %q:\n%s", value, got)
+		}
+	}
+	if strings.Contains(got, "2,410,000") {
+		t.Errorf("human-readable summary contains comma-formatted number:\n%s", got)
+	}
+}
+
 func TestRunSummaryReportsMissingDatabase(t *testing.T) {
 	var outputBuffer, errorBuffer bytes.Buffer
 	if code := runSummary(t.TempDir(), "", &outputBuffer, &errorBuffer); code != 2 {

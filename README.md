@@ -59,9 +59,12 @@ go build -o codex-pass ./cmd/codex-pass
 ./codex-pass --log ./usage --summary --time 2026-06-09,2026-10-10
 ./codex-pass --log ./usage --summary --time 2026-06-09-10-00,2026-10-10-08-45
 ./codex-pass --log ./usage --summary --time 2d
+./codex-pass --log ./usage --summary --human
 ```
 
 汇总会输出全部请求的成功、失败、取消、未结束次数，以及输入、缓存写入、缓存读取、输出、思考 Token；同一组指标也会按模型分别输出。`--summary` 指向不存在的数据库会报错，避免目录拼写错误时得到空统计。
+
+`--human` 仅可与 `--summary` 一起使用，会将两张汇总表中的数字按紧凑单位显示，最多保留两位小数，例如 `1.27K`、`2.41M`、`2.34B`。
 
 `--time` 仅可与 `--summary` 一起使用，按请求开始时间过滤：
 

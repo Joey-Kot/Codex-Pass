@@ -30,7 +30,7 @@ func run(arguments []string) int {
 	flags.SetOutput(os.Stderr)
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "Usage: codex-pass --key API_KEY [--listen ADDRESS] [--debug FILE] [--log DIR] AUTH_FILE [AUTH_FILE ...]")
-		fmt.Fprintln(flags.Output(), "       codex-pass --log DIR --summary [--time RANGE]")
+		fmt.Fprintln(flags.Output(), "       codex-pass --log DIR --summary [--time RANGE] [--human]")
 		fmt.Fprintln(flags.Output(), "\nTransparent Codex Responses API proxy listening on 127.0.0.1:8317 by default.")
 		flags.PrintDefaults()
 	}
@@ -39,6 +39,7 @@ func run(arguments []string) int {
 	logDirectory := flags.String("log", "", "optional directory for SQLite request usage logging")
 	summaryMode := flags.Bool("summary", false, "print SQLite request usage summary and exit (requires --log)")
 	timeRangeValue := flags.String("time", "", "summary range: START,END or 2d/1w/3m/1y (requires --summary)")
+	humanReadable := flags.Bool("human", false, "format summary table numbers with compact K/M/B units (requires --summary)")
 	listen := flags.String("listen", "", "listen address (overrides CODEX_PROXY_LISTEN)")
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -56,10 +57,15 @@ func run(arguments []string) int {
 			fmt.Fprintln(os.Stderr, "error: --summary does not accept auth files")
 			return 2
 		}
-		return runSummary(*logDirectory, *timeRangeValue, os.Stdout, os.Stderr)
+		return runSummaryWithOptions(*logDirectory, *timeRangeValue, *humanReadable, os.Stdout, os.Stderr)
 	}
 	if strings.TrimSpace(*timeRangeValue) != "" {
 		fmt.Fprintln(os.Stderr, "error: --time requires --summary")
+		flags.Usage()
+		return 2
+	}
+	if *humanReadable {
+		fmt.Fprintln(os.Stderr, "error: --human requires --summary")
 		flags.Usage()
 		return 2
 	}
@@ -159,6 +165,10 @@ func run(arguments []string) int {
 }
 
 func runSummary(logDirectory, timeRangeValue string, output, errorOutput io.Writer) int {
+	return runSummaryWithOptions(logDirectory, timeRangeValue, false, output, errorOutput)
+}
+
+func runSummaryWithOptions(logDirectory, timeRangeValue string, humanReadable bool, output, errorOutput io.Writer) int {
 	timeRange, err := requestlog.ParseTimeRange(timeRangeValue, time.Now())
 	if err != nil {
 		fmt.Fprintln(errorOutput, "error: invalid --time:", err)
@@ -179,53 +189,69 @@ func runSummary(logDirectory, timeRangeValue string, output, errorOutput io.Writ
 		fmt.Fprintln(errorOutput, "error:", err)
 		return 1
 	}
-	printSummary(output, strings.TrimSpace(timeRangeValue), summary)
+	printSummaryWithOptions(output, strings.TrimSpace(timeRangeValue), summary, humanReadable)
 	return 0
 }
 
 func printSummary(output io.Writer, timeRangeValue string, summary requestlog.Summary) {
+	printSummaryWithOptions(output, timeRangeValue, summary, false)
+}
+
+func printSummaryWithOptions(output io.Writer, timeRangeValue string, summary requestlog.Summary, humanReadable bool) {
 	if timeRangeValue == "" {
 		timeRangeValue = "all"
 	}
 	fmt.Fprintf(output, "Usage Summary (Range: %s)\n\n", timeRangeValue)
+	numberFormatter := formatNumber
+	if humanReadable {
+		numberFormatter = formatHumanNumber
+	}
 
 	rows := make([][]string, 0, len(summary.ByModel)+1)
-	rows = append(rows, requestCountRow("All models", summary.Total))
+	rows = append(rows, requestCountRowWithFormatter("All models", summary.Total, numberFormatter))
 	for _, model := range summary.ByModel {
-		rows = append(rows, requestCountRow(model.Model, model.Aggregate))
+		rows = append(rows, requestCountRowWithFormatter(model.Model, model.Aggregate, numberFormatter))
 	}
 	fmt.Fprintln(output, "Request Counts")
 	printASCIITable(output, []string{"Model", "Requests", "Success", "Failed", "Canceled", "Unfinished"}, rows)
 
 	rows = rows[:0]
-	rows = append(rows, tokenUsageRow("All models", summary.Total))
+	rows = append(rows, tokenUsageRowWithFormatter("All models", summary.Total, numberFormatter))
 	for _, model := range summary.ByModel {
-		rows = append(rows, tokenUsageRow(model.Model, model.Aggregate))
+		rows = append(rows, tokenUsageRowWithFormatter(model.Model, model.Aggregate, numberFormatter))
 	}
 	fmt.Fprintln(output, "\nToken Usage")
 	printASCIITable(output, []string{"Model", "Total", "Input", "Cache Write", "Cache Read", "Output", "Reasoning"}, rows)
 }
 
 func requestCountRow(model string, aggregate requestlog.Aggregate) []string {
+	return requestCountRowWithFormatter(model, aggregate, formatNumber)
+}
+
+func requestCountRowWithFormatter(model string, aggregate requestlog.Aggregate, numberFormatter func(int64) string) []string {
 	return []string{
 		model,
-		formatNumber(aggregate.Requests),
-		formatNumber(aggregate.Successes),
-		formatNumber(aggregate.Failures),
-		formatNumber(aggregate.Canceled),
-		formatNumber(aggregate.InProgress),
+		numberFormatter(aggregate.Requests),
+		numberFormatter(aggregate.Successes),
+		numberFormatter(aggregate.Failures),
+		numberFormatter(aggregate.Canceled),
+		numberFormatter(aggregate.InProgress),
 	}
 }
 
 func tokenUsageRow(model string, aggregate requestlog.Aggregate) []string {
+	return tokenUsageRowWithFormatter(model, aggregate, formatNumber)
+}
+
+func tokenUsageRowWithFormatter(model string, aggregate requestlog.Aggregate, numberFormatter func(int64) string) []string {
 	return []string{
 		model,
-		formatNumber(aggregate.InputTokens + aggregate.OutputTokens),
-		formatNumber(aggregate.InputTokens),
-		formatNumber(aggregate.CacheWriteTokens),
-		formatNumber(aggregate.CacheReadTokens),
-		formatNumber(aggregate.OutputTokens),
-		formatNumber(aggregate.ReasoningTokens),
+		numberFormatter(aggregate.InputTokens + aggregate.OutputTokens),
+		numberFormatter(aggregate.InputTokens),
+		numberFormatter(aggregate.CacheWriteTokens),
+		numberFormatter(aggregate.CacheReadTokens),
+		numberFormatter(aggregate.OutputTokens),
+		numberFormatter(aggregate.ReasoningTokens),
 	}
 }
 
@@ -299,6 +325,58 @@ func formatNumber(value int64) string {
 		result.WriteString(text[index : index+3])
 	}
 	return result.String()
+}
+
+func formatHumanNumber(value int64) string {
+	const unitBase = uint64(1000)
+	units := [...]string{"", "K", "M", "B", "T", "P", "E"}
+
+	if value > -1000 && value < 1000 {
+		return strconv.FormatInt(value, 10)
+	}
+
+	negative := value < 0
+	magnitude := uint64(value)
+	if negative {
+		magnitude = uint64(-(value + 1)) + 1
+	}
+
+	unitIndex := 0
+	divisor := uint64(1)
+	for unitIndex < len(units)-1 && magnitude >= divisor*unitBase {
+		divisor *= unitBase
+		unitIndex++
+	}
+
+	for {
+		whole := magnitude / divisor
+		remainder := magnitude % divisor
+		hundredths := (remainder + divisor/200) / (divisor / 100)
+		if hundredths == 100 {
+			whole++
+			hundredths = 0
+		}
+		if whole == unitBase && unitIndex < len(units)-1 {
+			divisor *= unitBase
+			unitIndex++
+			continue
+		}
+
+		result := strconv.FormatUint(whole, 10)
+		if hundredths != 0 {
+			if hundredths < 10 {
+				result += ".0" + strconv.FormatUint(hundredths, 10)
+			} else if hundredths%10 == 0 {
+				result += "." + strconv.FormatUint(hundredths/10, 10)
+			} else {
+				result += "." + strconv.FormatUint(hundredths, 10)
+			}
+		}
+		if negative {
+			result = "-" + result
+		}
+		return result + units[unitIndex]
+	}
 }
 
 func resolveListenAddress(cliAddress, environmentAddress string) string {
