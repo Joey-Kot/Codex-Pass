@@ -41,6 +41,24 @@ func TestParserLargeEventAndLimit(t *testing.T) {
 	}
 }
 
+func TestParserResumesAfterOversizedEvent(t *testing.T) {
+	stream := "event: oversized\n" +
+		"data: " + strings.Repeat("x", 2048) + "\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_after_large\"}}\n\n"
+	parser := NewParser(strings.NewReader(stream), 512)
+	if _, err := parser.Next(); !errors.Is(err, ErrEventTooLarge) {
+		t.Fatalf("first event error = %v, want ErrEventTooLarge", err)
+	}
+	event, err := parser.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Event != "response.completed" || !bytes.Contains(event.Data, []byte(`"resp_after_large"`)) {
+		t.Fatalf("event after oversized data = %#v", event)
+	}
+}
+
 func TestCollectorCompletedAndFallbackOutput(t *testing.T) {
 	stream := "event: response.output_item.done\n" +
 		"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"item_1\",\"type\":\"message\"}}\n\n" +

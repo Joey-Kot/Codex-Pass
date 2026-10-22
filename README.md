@@ -1,6 +1,6 @@
 # codex-pass
 
-`codex-pass` 是一个仅使用 Go 标准库的 Codex Responses API 本地代理。它提供 `POST /v1/responses`、`POST /v1/chat/completions` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
+`codex-pass` 是一个 Codex Responses API 本地代理。代理逻辑使用 Go 标准库；可选的 SQLite 请求统计使用纯 Go SQLite 驱动，不要求 CGO 或系统 SQLite 库。它提供 `POST /v1/responses`、`POST /v1/chat/completions` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
 
 `/v1/responses` 的设计目标是可审计的转发：流式请求和 SSE 内容按字节转发；非流式请求只把顶层 `stream` 改为 `true`，随后从 SSE 中提取 `response.completed.response`。`/v1/chat/completions` 会将 Chat 请求的 `messages` 转为 Responses `input`，再将上游 Responses 结果转为 Chat Completion：流式请求输出 Chat Completion SSE 块并以 `[DONE]` 结束，非流式请求输出一个 `chat.completion` JSON 对象。当前有五类显式兼容改写：字符串 `input` 包装为官方 Codex 使用的用户消息列表，顶层 `service_tier: "fast"` 映射为 `"priority"`，顶层 `store` 强制为布尔值 `false`，顶层 `temperature` 和 `prompt_cache_options` 会被删除，并删除任意嵌套位置的 `prompt_cache_breakpoint`。所有改写都会记录在 Debug 字段差异中；其他上游参数错误会原样返回，不会通过删除字段、改模型名或注入工具来“兼容”。
 
@@ -22,10 +22,11 @@ go build -o codex-pass ./cmd/codex-pass
   --key sk-local-secret \
   --listen 127.0.0.1:8317 \
   --debug ./proxy.jsonl \
+  --log ./usage \
   /path/to/copied-auth.json
 ```
 
-`--key` 必填，`--debug` 和 `--listen` 可选，后面必须给出至少一个 Auth File。`--listen` 优先于 `CODEX_PROXY_LISTEN`；两者都未设置时默认监听 `127.0.0.1:8317`。如果改成非回环地址，程序会发出 TLS、访问控制和日志保护提示。
+常规代理模式下，`--key` 必填，`--debug`、`--log` 和 `--listen` 可选，后面必须给出至少一个 Auth File。`--listen` 优先于 `CODEX_PROXY_LISTEN`；两者都未设置时默认监听 `127.0.0.1:8317`。如果改成非回环地址，程序会发出 TLS、访问控制和日志保护提示。
 
 建议先复制官方 Codex 或 CPA 的认证文件到专用目录，再传给代理。刷新令牌通常会轮换；代理会原子写回指定文件并设为 `0600`，因此不建议多个程序同时刷新同一个源文件。
 
@@ -35,6 +36,40 @@ go build -o codex-pass ./cmd/codex-pass
 - 已知 CPA 展平格式：`type: "codex"`，并有 `access_token`（或 `accessToken`）、`refresh_token`（或 `refreshToken`）、`account_id`（也接受 `chatgpt_account_id` / `accountId`）。
 
 其他格式会在启动时以明确错误拒绝，不会猜测字段含义。
+
+## 请求用量 SQLite 日志与汇总
+
+传入 `--log DIR` 后，代理会在目录中创建并写入 `DIR/codex-pass.sqlite`。未传该参数时不会创建或写入 SQLite 数据库。
+
+数据库记录每一条已通过本地 API Key 校验的 `/v1/responses` 和 `/v1/chat/completions` 请求，不记录 `/healthz`、未知路径或未认证流量。每条记录包含：请求开始、结束时间，模型名，输入 Token、缓存写入 Token、缓存读取 Token、输出 Token、思考 Token，以及请求中的 `reasoning.effort`（Chat 请求也兼容 `reasoning_effort`）。请求正文、响应正文、认证信息和缓存键不会写入 SQLite。
+
+模型优先使用上游最终响应中的模型名；请求在取得最终响应前失败时，使用客户端请求中的模型名。未由上游返回的用量字段会保存为 `NULL`，汇总只累加上游实际提供的数字，不会推断为零。
+
+请求结果分为以下互斥状态：
+
+- 成功：上游正常完成 `response.completed`。
+- 取消：客户端请求上下文已取消，或上游最终状态为 `canceled` / `cancelled`。
+- 失败：未正常完成且不属于取消，例如上游错误、网络中断、SSE 提前结束、响应解析失败或转换失败。
+- 未结束：进程异常停止前已经开始、但尚未写入最终状态的记录。
+
+使用 `--summary` 查询数据库，不会启动代理，也不要求 `--key` 或 Auth File：
+
+```bash
+./codex-pass --log ./usage --summary
+./codex-pass --log ./usage --summary --time 2026-06-09,2026-10-10
+./codex-pass --log ./usage --summary --time 2026-06-09-10-00,2026-10-10-08-45
+./codex-pass --log ./usage --summary --time 2d
+```
+
+汇总会输出全部请求的成功、失败、取消、未结束次数，以及输入、缓存写入、缓存读取、输出、思考 Token；同一组指标也会按模型分别输出。`--summary` 指向不存在的数据库会报错，避免目录拼写错误时得到空统计。
+
+`--time` 仅可与 `--summary` 一起使用，按请求开始时间过滤：
+
+- `YYYY-MM-DD,YYYY-MM-DD`：按运行机器的本地时区解释，包含首日和末日的整天。
+- `YYYY-MM-DD-HH-MM,YYYY-MM-DD-HH-MM`：精确到分钟，包含结束分钟。
+- `2d`、`1w`、`3m`、`1y`：从执行命令时刻向前回溯到当前时刻；`m` 和 `y` 分别按日历月和日历年计算。
+
+数据库内部使用 UTC Unix 毫秒保存请求时间。SQLite 启用 WAL，因此代理运行时可以执行独立的 `--summary` 查询。
 
 ## 调用示例
 
@@ -133,4 +168,4 @@ scripts/probe_fast.sh \
 
 ## 范围
 
-未提供 Web 管理面板、数据库、用户系统、模型映射、参数修复、请求内容缓存、负载均衡或 WebSocket。非流式 SSE 未出现 `response.completed` 时，代理返回明确的 502 聚合失败，不会伪造成功结果。
+未提供 Web 管理面板、用户系统、模型映射、参数修复、请求内容缓存、负载均衡或 WebSocket。`--log` 仅提供本地 SQLite 用量统计，不提供 Web 管理界面。非流式 SSE 未出现 `response.completed` 时，代理返回明确的 502 聚合失败，不会伪造成功结果。

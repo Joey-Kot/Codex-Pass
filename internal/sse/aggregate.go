@@ -41,6 +41,9 @@ func (c Collector) Collect(reader io.Reader) (json.RawMessage, error) {
 			if errors.Is(err, errReadLimit) {
 				return nil, ErrTooLarge
 			}
+			if errors.Is(err, ErrEventTooLarge) {
+				return nil, ErrTooLarge
+			}
 			if errors.Is(err, io.EOF) {
 				return nil, ErrIncomplete
 			}

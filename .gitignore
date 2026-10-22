@@ -17,6 +17,11 @@
 *.jsonl
 /proxy.jsonl
 
+# Local request usage SQLite databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
 # Local OAuth credential copies. Keep testdata/mock_auth.json tracked.
 /auth.json
 /.auth/

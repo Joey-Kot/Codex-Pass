@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+	"time"
+
+	"codex-pass/internal/requestlog"
+)
 
 func TestResolveListenAddress(t *testing.T) {
 	tests := []struct {
@@ -20,5 +27,102 @@ func TestResolveListenAddress(t *testing.T) {
 				t.Fatalf("resolveListenAddress(%q, %q) = %q, want %q", test.cli, test.env, got, test.want)
 			}
 		})
+	}
+}
+
+func TestRunSummaryPrintsGlobalAndModelTotals(t *testing.T) {
+	directory := t.TempDir()
+	store, err := requestlog.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, time.June, 9, 10, 0, 0, 0, time.UTC)
+	if err := store.Begin(requestlog.Request{RequestID: "one", StartedAt: started, Endpoint: "responses", Model: "gpt-6-luna", ReasoningEffort: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	input := int64(12)
+	cacheWrite := int64(3)
+	cacheRead := int64(4)
+	output := int64(5)
+	reasoning := int64(6)
+	if err := store.Finish(requestlog.Completion{
+		RequestID:        "one",
+		FinishedAt:       started.Add(time.Second),
+		InputTokens:      &input,
+		CacheWriteTokens: &cacheWrite,
+		CacheReadTokens:  &cacheRead,
+		OutputTokens:     &output,
+		ReasoningTokens:  &reasoning,
+		Outcome:          requestlog.OutcomeSuccess,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var outputBuffer, errorBuffer bytes.Buffer
+	if code := runSummary(directory, "", &outputBuffer, &errorBuffer); code != 0 {
+		t.Fatalf("runSummary code = %d, stderr = %s", code, errorBuffer.String())
+	}
+	want := `Usage Summary (Range: all)
+
+Request Counts
++------------+----------+---------+--------+----------+------------+
+| Model      | Requests | Success | Failed | Canceled | Unfinished |
++------------+----------+---------+--------+----------+------------+
+| All models |        1 |       1 |      0 |        0 |          0 |
+| gpt-6-luna |        1 |       1 |      0 |        0 |          0 |
++------------+----------+---------+--------+----------+------------+
+
+Token Usage
++------------+-------+-------+-------------+------------+--------+-----------+
+| Model      | Total | Input | Cache Write | Cache Read | Output | Reasoning |
++------------+-------+-------+-------------+------------+--------+-----------+
+| All models |    17 |    12 |           3 |          4 |      5 |         6 |
+| gpt-6-luna |    17 |    12 |           3 |          4 |      5 |         6 |
++------------+-------+-------+-------------+------------+--------+-----------+
+`
+	if got := outputBuffer.String(); got != want {
+		t.Fatalf("summary output =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestFormatNumber(t *testing.T) {
+	tests := map[int64]string{
+		-1234567: "-1,234,567",
+		0:        "0",
+		999:      "999",
+		1000:     "1,000",
+		6589:     "6,589",
+	}
+	for input, want := range tests {
+		if got := formatNumber(input); got != want {
+			t.Errorf("formatNumber(%d) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestRunSummaryReportsMissingDatabase(t *testing.T) {
+	var outputBuffer, errorBuffer bytes.Buffer
+	if code := runSummary(t.TempDir(), "", &outputBuffer, &errorBuffer); code != 2 {
+		t.Fatalf("runSummary code = %d, want 2", code)
+	}
+	if !strings.Contains(errorBuffer.String(), "does not exist") {
+		t.Fatalf("missing database error = %s", errorBuffer.String())
+	}
+}
+
+func TestSummaryModeDoesNotRequireKeyOrAuthFile(t *testing.T) {
+	directory := t.TempDir()
+	store, err := requestlog.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"--log", directory, "--summary"}); code != 0 {
+		t.Fatalf("summary mode code = %d, want 0", code)
 	}
 }

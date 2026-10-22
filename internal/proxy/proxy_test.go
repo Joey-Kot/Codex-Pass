@@ -20,6 +20,7 @@ import (
 
 	"codex-pass/internal/auth"
 	debuglog "codex-pass/internal/debug"
+	"codex-pass/internal/requestlog"
 )
 
 const transparentRequest = `{
@@ -408,7 +409,8 @@ func TestClientCancellationCancelsUpstream(t *testing.T) {
 		close(cancelled)
 	}))
 	defer upstream.Close()
-	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "")
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
 	defer cleanup()
 	context, cancel := ContextWithCancel(context.Background())
 	defer cancel()
@@ -433,6 +435,224 @@ func TestClientCancellationCancelsUpstream(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream request context was not cancelled")
 	}
+	completion := recorder.waitForCompletion(t)
+	if completion.Outcome != requestlog.OutcomeCanceled || completion.ErrorKind != "client_canceled" {
+		t.Fatalf("cancellation completion = %#v", completion)
+	}
+}
+
+func TestRequestLogCapturesTransparentStreamingUsageWithoutDebug(t *testing.T) {
+	completed := `{"id":"resp_usage","status":"completed","model":"gpt-6.1-sol","output":[],"usage":{"input_tokens":100,"input_tokens_details":{"cache_write_tokens":30,"cached_tokens":40},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":10}}}`
+	expected := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n")
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write(expected)
+	}))
+	defer upstream.Close()
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
+	defer cleanup()
+
+	response := post(t, proxyServer, []byte(`{"model":"requested-model","stream":true,"reasoning":{"effort":"high"},"input":[]}`))
+	actual, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, expected) {
+		t.Fatalf("stream body changed:\n%s\nwant:\n%s", actual, expected)
+	}
+	requestRecord, completion := recorder.waitForRequestAndCompletion(t)
+	if requestRecord.Endpoint != "responses" || requestRecord.Model != "requested-model" || requestRecord.ReasoningEffort != "high" || requestRecord.StartedAt.IsZero() {
+		t.Fatalf("request record = %#v", requestRecord)
+	}
+	if completion.FinishedAt.IsZero() || completion.Outcome != requestlog.OutcomeSuccess || completion.Model != "gpt-6.1-sol" || completion.ReasoningEffort != "high" {
+		t.Fatalf("completion = %#v", completion)
+	}
+	assertCompletionTokens(t, completion, 100, 30, 40, 20, 10)
+}
+
+func TestRequestLogStartsBeforeRequestBodyRead(t *testing.T) {
+	completed := `{"id":"resp_slow_body","status":"completed","model":"gpt-6-luna","output":[]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n"))
+	}))
+	defer upstream.Close()
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
+	defer cleanup()
+
+	bodyReader, bodyWriter := io.Pipe()
+	defer bodyWriter.Close()
+	request, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/responses", bodyReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer sk-local-secret")
+	request.Header.Set("Content-Type", "application/json")
+	responseResult := make(chan struct {
+		response *http.Response
+		err      error
+	}, 1)
+	go func() {
+		response, requestErr := proxyServer.Client().Do(request)
+		responseResult <- struct {
+			response *http.Response
+			err      error
+		}{response: response, err: requestErr}
+	}()
+
+	requestRecord := recorder.waitForRequestStart(t)
+	if requestRecord.Endpoint != "responses" || requestRecord.StartedAt.IsZero() || requestRecord.Model != "" || requestRecord.ReasoningEffort != "" {
+		t.Fatalf("initial request record = %#v", requestRecord)
+	}
+	if _, err := bodyWriter.Write([]byte(`{"model":"requested-model","stream":true,"reasoning":{"effort":"high"},"input":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bodyWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := <-responseResult
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if _, err := io.ReadAll(result.response.Body); err != nil {
+		result.response.Body.Close()
+		t.Fatal(err)
+	}
+	result.response.Body.Close()
+	completion := recorder.waitForCompletion(t)
+	if completion.Outcome != requestlog.OutcomeSuccess || completion.Model != "gpt-6-luna" || completion.ReasoningEffort != "high" {
+		t.Fatalf("completion = %#v", completion)
+	}
+}
+
+func TestRequestLogForcesIdentityForTransparentStreaming(t *testing.T) {
+	completed := `{"id":"resp_identity","status":"completed","model":"gpt-6-luna","output":[],"usage":{"input_tokens":5}}`
+	expected := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n")
+	upstreamEncoding := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamEncoding <- request.Header.Get("Accept-Encoding")
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write(expected)
+	}))
+	defer upstream.Close()
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
+	defer cleanup()
+
+	request, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-6-luna","stream":true,"input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer sk-local-secret")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept-Encoding", "gzip")
+	response, err := proxyServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := <-upstreamEncoding; got != "identity" {
+		t.Fatalf("upstream Accept-Encoding = %q, want identity", got)
+	}
+	if !bytes.Equal(actual, expected) {
+		t.Fatalf("stream body changed:\n%s\nwant:\n%s", actual, expected)
+	}
+	completion := recorder.waitForCompletion(t)
+	if completion.Outcome != requestlog.OutcomeSuccess || completion.InputTokens == nil || *completion.InputTokens != 5 {
+		t.Fatalf("completion = %#v", completion)
+	}
+}
+
+func TestRequestLogMarksIncompleteSSEAsFailure(t *testing.T) {
+	terminal := `{"status":"incomplete","model":"gpt-6-luna","usage":{"input_tokens":8,"output_tokens":2}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":" + terminal + "}\n\n"))
+	}))
+	defer upstream.Close()
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
+	defer cleanup()
+
+	response := post(t, proxyServer, []byte(`{"model":"gpt-6-luna","input":[]}`))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, body = %s", response.StatusCode, body)
+	}
+	completion := recorder.waitForCompletion(t)
+	if completion.Outcome != requestlog.OutcomeFailure || completion.ErrorKind != "stream_aggregation" {
+		t.Fatalf("failure completion = %#v", completion)
+	}
+	if completion.InputTokens == nil || *completion.InputTokens != 8 || completion.OutputTokens == nil || *completion.OutputTokens != 2 {
+		t.Fatalf("terminal usage was not recorded: %#v", completion)
+	}
+}
+
+func TestRequestLogMarksTransparentTerminalEventAsFailure(t *testing.T) {
+	terminal := `{"model":"gpt-6-luna","usage":{"input_tokens":8,"output_tokens":2}}`
+	expected := []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":" + terminal + "}\n\n")
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write(expected)
+	}))
+	defer upstream.Close()
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
+	defer cleanup()
+
+	response := post(t, proxyServer, []byte(`{"model":"gpt-6-luna","stream":true,"input":[]}`))
+	actual, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, expected) {
+		t.Fatalf("transparent terminal body changed: %s", actual)
+	}
+	completion := recorder.waitForCompletion(t)
+	if completion.Outcome != requestlog.OutcomeFailure || completion.ErrorKind != "upstream_terminal" {
+		t.Fatalf("transparent terminal completion = %#v", completion)
+	}
+	if completion.InputTokens == nil || *completion.InputTokens != 8 || completion.OutputTokens == nil || *completion.OutputTokens != 2 {
+		t.Fatalf("transparent terminal usage was not recorded: %#v", completion)
+	}
+}
+
+func TestSQLiteRequestLogIntegratesWithProxyAndSummary(t *testing.T) {
+	completed := `{"id":"resp_sqlite","status":"completed","model":"gpt-6-luna","output":[],"usage":{"input_tokens":9,"output_tokens":2}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n"))
+	}))
+	defer upstream.Close()
+	store, err := requestlog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", store)
+	defer cleanup()
+
+	response := post(t, proxyServer, []byte(`{"model":"gpt-6-luna","stream":true,"input":[]}`))
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	summary, err := store.Summary(requestlog.TimeRange{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Total.Successes != 1 || summary.Total.InputTokens != 9 || summary.Total.OutputTokens != 2 {
+		t.Fatalf("SQLite summary = %#v", summary.Total)
+	}
 }
 
 func TestDiffJSONReportsOnlyTopLevelStreamChange(t *testing.T) {
@@ -447,7 +667,7 @@ func TestDiffJSONReportsOnlyTopLevelStreamChange(t *testing.T) {
 	}
 }
 
-func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debugPath string) (*httptest.Server, func()) {
+func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debugPath string, requestLogs ...requestlog.Recorder) (*httptest.Server, func()) {
 	t.Helper()
 	authPath := filepath.Join(t.TempDir(), "auth.json")
 	if err := os.WriteFile(authPath, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"test-access","refresh_token":"test-refresh","account_id":"test-account"}}`), 0o600); err != nil {
@@ -468,7 +688,14 @@ func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debu
 			t.Fatal(err)
 		}
 	}
-	handler, err := New(Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", Logger: logger})
+	var requestLog requestlog.Recorder
+	if len(requestLogs) > 1 {
+		t.Fatal("only one request log recorder may be provided")
+	}
+	if len(requestLogs) == 1 {
+		requestLog = requestLogs[0]
+	}
+	handler, err := New(Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", Logger: logger, RequestLog: requestLog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,6 +712,105 @@ func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debu
 		})
 	}
 	return server, cleanup
+}
+
+type captureRecorder struct {
+	mu          sync.Mutex
+	requests    []requestlog.Request
+	completions []requestlog.Completion
+	begun       chan struct{}
+	finished    chan struct{}
+}
+
+func newCaptureRecorder() *captureRecorder {
+	return &captureRecorder{begun: make(chan struct{}, 16), finished: make(chan struct{}, 16)}
+}
+
+func (r *captureRecorder) Begin(request requestlog.Request) error {
+	r.mu.Lock()
+	r.requests = append(r.requests, request)
+	r.mu.Unlock()
+	r.begun <- struct{}{}
+	return nil
+}
+
+func (r *captureRecorder) UpdateMetadata(metadata requestlog.RequestMetadata) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index := range r.requests {
+		if r.requests[index].RequestID != metadata.RequestID {
+			continue
+		}
+		if metadata.Model != "" {
+			r.requests[index].Model = metadata.Model
+		}
+		if metadata.ReasoningEffort != "" {
+			r.requests[index].ReasoningEffort = metadata.ReasoningEffort
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown request ID %q", metadata.RequestID)
+}
+
+func (r *captureRecorder) Finish(completion requestlog.Completion) error {
+	r.mu.Lock()
+	r.completions = append(r.completions, completion)
+	r.mu.Unlock()
+	r.finished <- struct{}{}
+	return nil
+}
+
+func (r *captureRecorder) Err() error { return nil }
+
+func (r *captureRecorder) waitForRequestStart(t *testing.T) requestlog.Request {
+	t.Helper()
+	select {
+	case <-r.begun:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request log start was not recorded")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(r.requests))
+	}
+	return r.requests[0]
+}
+
+func (r *captureRecorder) waitForCompletion(t *testing.T) requestlog.Completion {
+	t.Helper()
+	select {
+	case <-r.finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request log completion was not recorded")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.completions) != 1 {
+		t.Fatalf("completion count = %d, want 1", len(r.completions))
+	}
+	return r.completions[0]
+}
+
+func (r *captureRecorder) waitForRequestAndCompletion(t *testing.T) (requestlog.Request, requestlog.Completion) {
+	completion := r.waitForCompletion(t)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(r.requests))
+	}
+	return r.requests[0], completion
+}
+
+func assertCompletionTokens(t *testing.T, completion requestlog.Completion, input, cacheWrite, cacheRead, output, reasoning int64) {
+	t.Helper()
+	if completion.InputTokens == nil || *completion.InputTokens != input ||
+		completion.CacheWriteTokens == nil || *completion.CacheWriteTokens != cacheWrite ||
+		completion.CacheReadTokens == nil || *completion.CacheReadTokens != cacheRead ||
+		completion.OutputTokens == nil || *completion.OutputTokens != output ||
+		completion.ReasoningTokens == nil || *completion.ReasoningTokens != reasoning {
+		t.Fatalf("completion token accounting = %#v", completion)
+	}
 }
 
 func post(t *testing.T, server *httptest.Server, body []byte) *http.Response {

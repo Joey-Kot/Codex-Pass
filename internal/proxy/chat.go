@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,20 +33,41 @@ type chatRequest struct {
 func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http.Request) {
 	started := time.Now()
 	requestID := s.newRequestID()
-	body, err := s.readBody(request.Body)
-	if err != nil {
-		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusRequestEntityTooLarge, "error": debuglog.Error(err)})
-		writeError(writer, http.StatusRequestEntityTooLarge, err.Error())
+	metrics, logErr := s.beginRequestLog(request, requestID, "chat_completions", started)
+	if logErr != nil {
+		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(logErr), "operation": "start request log"})
+		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
+		return
+	}
+	defer func() {
+		if finishErr := metrics.finish(); finishErr != nil {
+			s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(finishErr), "operation": "finish request log"})
+			log.Printf("request usage log error for %s: %v", requestID, finishErr)
+		}
+	}()
+	body, readErr := s.readBody(request.Body)
+	if readErr != nil {
+		metrics.failure("request_body_read")
+		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusRequestEntityTooLarge, "error": debuglog.Error(readErr)})
+		writeError(writer, http.StatusRequestEntityTooLarge, readErr.Error())
+		return
+	}
+	if err := metrics.setRequestMetadata(body); err != nil {
+		metrics.failure("request_log_metadata")
+		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "update request log metadata"})
+		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
 		return
 	}
 	chat, err := prepareChatCompletionBody(body)
 	if err != nil {
+		metrics.failure("invalid_request")
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusBadRequest, "error": debuglog.Error(err)})
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 	_, upstreamBody, promptCacheKey, err := prepareBody(chat.upstream)
 	if err != nil {
+		metrics.failure("invalid_request")
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusBadRequest, "error": debuglog.Error(err)})
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
@@ -61,6 +83,7 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 	if s.logger != nil {
 		diff, diffErr := DiffJSON(body, upstreamBody)
 		if diffErr != nil {
+			metrics.failure("invalid_request")
 			writeError(writer, http.StatusBadRequest, "invalid JSON request: "+diffErr.Error())
 			return
 		}
@@ -79,6 +102,7 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 	}
 
 	if err := s.authPool.EnsureFresh(request.Context(), credential); err != nil {
+		metrics.failureForError("oauth_token_refresh", err)
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "proactive token refresh"})
 		writeError(writer, http.StatusBadGateway, "OAuth token refresh failed: "+debuglog.Error(err))
 		return
@@ -90,6 +114,7 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 	upstreamHeaders.Set("Accept-Encoding", "identity")
 	upstream, err := s.sendUpstream(request.Context(), upstreamHeaders, upstreamBody, credential, sessionID, requestID)
 	if err != nil {
+		metrics.failureForError("upstream_request", err)
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "upstream request"})
 		writeError(writer, http.StatusBadGateway, "upstream request failed: "+debuglog.Error(err))
 		return
@@ -97,6 +122,7 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 	if upstream.StatusCode == http.StatusUnauthorized {
 		upstream = s.retryUnauthorized(request.Context(), upstreamHeaders, upstreamBody, credential, sessionID, upstream, requestID)
 		if upstream == nil {
+			metrics.failureForError("upstream_authentication_refresh", request.Context().Err())
 			writeError(writer, http.StatusBadGateway, "upstream authentication refresh failed")
 			return
 		}
@@ -108,6 +134,7 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 		})
 	}
 	if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
+		metrics.failure("upstream_http_status")
 		s.copyUpstreamResponse(writer, upstream)
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": upstream.StatusCode, "mode": "upstream_error", "api": "chat_completions"})
 		s.logSummary(requestID, started, time.Time{}, nil, accountIndex, promptCacheKey, sessionID)
@@ -116,8 +143,14 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 
 	if chat.stream {
 		firstEvent, final, streamErr := s.forwardChatCompletionStream(writer, upstream.Body, upstream.Header, chat, requestID)
+		if len(final) != 0 {
+			metrics.terminal(final, "")
+		}
 		if streamErr != nil {
+			metrics.failureForError("chat_stream_conversion", streamErr)
 			s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(streamErr), "operation": "chat completion stream conversion"})
+		} else if len(final) == 0 {
+			metrics.failure("stream_ended_without_completed")
 		}
 		if len(final) != 0 {
 			s.log(requestID, "UPSTREAM_COMPLETED", map[string]any{"response": string(final)})
@@ -141,13 +174,20 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 	}
 	final, collectErr := collector.Collect(upstream.Body)
 	if collectErr != nil {
+		terminalResponse, terminalKind := responseFromTerminalError(collectErr)
+		if len(terminalResponse) != 0 {
+			metrics.terminal(terminalResponse, terminalKind)
+		}
+		metrics.failureForError("stream_aggregation", collectErr)
 		s.writeCollectError(writer, collectErr)
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": statusForCollectError(collectErr), "error": debuglog.Error(collectErr), "api": "chat_completions"})
-		s.logSummary(requestID, started, firstEvent, nil, accountIndex, promptCacheKey, sessionID)
+		s.logSummary(requestID, started, firstEvent, terminalResponse, accountIndex, promptCacheKey, sessionID)
 		return
 	}
 	converted, err := responseToChatCompletion(final, chat.model)
 	if err != nil {
+		metrics.complete(final)
+		metrics.failure("chat_completion_conversion")
 		writeError(writer, http.StatusBadGateway, "upstream response conversion failed: "+debuglog.Error(err))
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "chat completion conversion"})
 		s.logSummary(requestID, started, firstEvent, final, accountIndex, promptCacheKey, sessionID)
@@ -155,7 +195,12 @@ func (s *Server) handleChatCompletions(writer http.ResponseWriter, request *http
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(converted)
+	if _, writeErr := writer.Write(converted); writeErr != nil {
+		metrics.complete(final)
+		metrics.failureForError("client_response_write", writeErr)
+	} else {
+		metrics.complete(final)
+	}
 	s.log(requestID, "UPSTREAM_COMPLETED", map[string]any{"response": string(final)})
 	s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusOK, "mode": "chat_aggregated", "body": string(converted)})
 	s.logSummary(requestID, started, firstEvent, final, accountIndex, promptCacheKey, sessionID)
@@ -882,7 +927,7 @@ func (c *chatStreamConverter) consume(event sse.Event) ([]map[string]any, json.R
 		c.completed = true
 		return chunks, append(json.RawMessage(nil), envelope.Response...), true, nil
 	case "response.failed", "response.incomplete", "error":
-		return nil, nil, true, nil
+		return nil, append(json.RawMessage(nil), envelope.Response...), true, nil
 	}
 	return chunks, nil, false, nil
 }

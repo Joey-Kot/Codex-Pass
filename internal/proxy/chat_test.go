@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"codex-pass/internal/requestlog"
 	"codex-pass/internal/sse"
 )
 
@@ -72,6 +73,36 @@ func TestChatCompletionNonStreamingConvertsResponsesResult(t *testing.T) {
 	if usage["prompt_tokens"].(float64) != 7 || usage["completion_tokens"].(float64) != 3 || usage["total_tokens"].(float64) != 10 {
 		t.Fatalf("unexpected mapped usage: %s", actual)
 	}
+}
+
+func TestChatCompletionRequestLogCapturesUsage(t *testing.T) {
+	completed := `{"id":"resp_chat_usage","created_at":1710000000,"model":"gpt-6.1-sol","status":"completed","output":[],"usage":{"input_tokens":12,"input_tokens_details":{"cache_write_tokens":3,"cached_tokens":4},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":6}}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n"))
+	}))
+	defer upstream.Close()
+	recorder := newCaptureRecorder()
+	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "", recorder)
+	defer cleanup()
+
+	response := postChat(t, proxyServer, []byte(`{"model":"requested-chat-model","reasoning":{"effort":"medium"},"messages":[{"role":"user","content":"hello"}]}`))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	requestRecord, completion := recorder.waitForRequestAndCompletion(t)
+	if requestRecord.Endpoint != "chat_completions" || requestRecord.Model != "requested-chat-model" || requestRecord.ReasoningEffort != "medium" || requestRecord.StartedAt.IsZero() {
+		t.Fatalf("request record = %#v", requestRecord)
+	}
+	if completion.Outcome != requestlog.OutcomeSuccess || completion.Model != "gpt-6.1-sol" || completion.ReasoningEffort != "medium" {
+		t.Fatalf("completion = %#v", completion)
+	}
+	assertCompletionTokens(t, completion, 12, 3, 4, 5, 6)
 }
 
 func TestChatCompletionStreamingConvertsResponsesEvents(t *testing.T) {

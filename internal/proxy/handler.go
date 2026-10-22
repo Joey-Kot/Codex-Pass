@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"codex-pass/internal/auth"
 	debuglog "codex-pass/internal/debug"
+	"codex-pass/internal/requestlog"
 	"codex-pass/internal/sse"
 )
 
@@ -31,6 +33,7 @@ type Config struct {
 	HTTPClient   *http.Client
 	UpstreamURL  string
 	Logger       *debuglog.Logger
+	RequestLog   requestlog.Recorder
 	MaxBodyBytes int64
 	MaxAggregate int64
 	UserAgent    string
@@ -42,6 +45,7 @@ type Server struct {
 	httpClient   *http.Client
 	upstreamURL  string
 	logger       *debuglog.Logger
+	requestLog   requestlog.Recorder
 	maxBodyBytes int64
 	maxAggregate int64
 	userAgent    string
@@ -72,7 +76,7 @@ func New(config Config) (*Server, error) {
 	}
 	return &Server{
 		apiKey: config.APIKey, authPool: config.AuthPool, httpClient: config.HTTPClient,
-		upstreamURL: config.UpstreamURL, logger: config.Logger, maxBodyBytes: config.MaxBodyBytes,
+		upstreamURL: config.UpstreamURL, logger: config.Logger, requestLog: config.RequestLog, maxBodyBytes: config.MaxBodyBytes,
 		maxAggregate: config.MaxAggregate, userAgent: config.UserAgent,
 	}, nil
 }
@@ -113,6 +117,10 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "debug logger is unavailable")
 		return
 	}
+	if s.requestLog != nil && s.requestLog.Err() != nil {
+		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
+		return
+	}
 	if request.URL.Path == "/v1/chat/completions" {
 		s.handleChatCompletions(writer, request)
 		return
@@ -131,14 +139,34 @@ func (s *Server) authorized(header string) bool {
 func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Request) {
 	started := time.Now()
 	requestID := s.newRequestID()
-	body, err := s.readBody(request.Body)
-	if err != nil {
-		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusRequestEntityTooLarge, "error": debuglog.Error(err)})
-		writeError(writer, http.StatusRequestEntityTooLarge, err.Error())
+	metrics, logErr := s.beginRequestLog(request, requestID, "responses", started)
+	if logErr != nil {
+		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(logErr), "operation": "start request log"})
+		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
+		return
+	}
+	defer func() {
+		if finishErr := metrics.finish(); finishErr != nil {
+			s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(finishErr), "operation": "finish request log"})
+			log.Printf("request usage log error for %s: %v", requestID, finishErr)
+		}
+	}()
+	body, readErr := s.readBody(request.Body)
+	if readErr != nil {
+		metrics.failure("request_body_read")
+		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusRequestEntityTooLarge, "error": debuglog.Error(readErr)})
+		writeError(writer, http.StatusRequestEntityTooLarge, readErr.Error())
+		return
+	}
+	if err := metrics.setRequestMetadata(body); err != nil {
+		metrics.failure("request_log_metadata")
+		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "update request log metadata"})
+		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
 		return
 	}
 	stream, upstreamBody, promptCacheKey, err := prepareBody(body)
 	if err != nil {
+		metrics.failure("invalid_request")
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusBadRequest, "error": debuglog.Error(err)})
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
@@ -151,6 +179,7 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	if s.logger != nil {
 		diff, err := DiffJSON(body, upstreamBody)
 		if err != nil {
+			metrics.failure("invalid_request")
 			writeError(writer, http.StatusBadRequest, "invalid JSON request: "+err.Error())
 			return
 		}
@@ -169,20 +198,31 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	}
 
 	if err := s.authPool.EnsureFresh(request.Context(), credential); err != nil {
+		metrics.failureForError("oauth_token_refresh", err)
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "proactive token refresh"})
 		writeError(writer, http.StatusBadGateway, "OAuth token refresh failed: "+debuglog.Error(err))
 		return
 	}
 
-	upstream, err := s.sendUpstream(request.Context(), request.Header, upstreamBody, credential, sessionID, requestID)
+	upstreamHeaders := request.Header
+	if !stream || s.logger != nil || s.requestLog != nil {
+		// Aggregation, debug tracing, and request accounting all parse the
+		// upstream SSE stream. Request uncompressed bytes for those paths so a
+		// client-negotiated content encoding is never parsed as SSE data.
+		upstreamHeaders = request.Header.Clone()
+		upstreamHeaders.Set("Accept-Encoding", "identity")
+	}
+	upstream, err := s.sendUpstream(request.Context(), upstreamHeaders, upstreamBody, credential, sessionID, requestID)
 	if err != nil {
+		metrics.failureForError("upstream_request", err)
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "upstream request"})
 		writeError(writer, http.StatusBadGateway, "upstream request failed: "+debuglog.Error(err))
 		return
 	}
 	if upstream.StatusCode == http.StatusUnauthorized {
-		upstream = s.retryUnauthorized(request.Context(), request.Header, upstreamBody, credential, sessionID, upstream, requestID)
+		upstream = s.retryUnauthorized(request.Context(), upstreamHeaders, upstreamBody, credential, sessionID, upstream, requestID)
 		if upstream == nil {
+			metrics.failureForError("upstream_authentication_refresh", request.Context().Err())
 			writeError(writer, http.StatusBadGateway, "upstream authentication refresh failed")
 			return
 		}
@@ -195,6 +235,7 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	}
 
 	if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
+		metrics.failure("upstream_http_status")
 		s.copyUpstreamResponse(writer, upstream)
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": upstream.StatusCode, "mode": "upstream_error"})
 		s.logSummary(requestID, started, time.Time{}, nil, accountIndex, promptCacheKey, sessionID)
@@ -202,9 +243,15 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	}
 
 	if stream {
-		firstEvent, final, streamErr := s.forwardStream(writer, upstream.Body, upstream.Header, upstream.StatusCode, requestID)
+		firstEvent, final, terminalKind, streamErr := s.forwardStream(writer, upstream.Body, upstream.Header, upstream.StatusCode, requestID)
+		if len(final) != 0 {
+			metrics.terminal(final, terminalKind)
+		}
 		if streamErr != nil {
+			metrics.failureForError("stream_forward", streamErr)
 			s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(streamErr), "operation": "stream forward"})
+		} else if len(final) == 0 {
+			metrics.failure("stream_ended_without_completed")
 		}
 		if len(final) != 0 {
 			s.log(requestID, "UPSTREAM_COMPLETED", map[string]any{"response": string(final)})
@@ -228,14 +275,23 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	}
 	final, collectErr := collector.Collect(upstream.Body)
 	if collectErr != nil {
+		terminalResponse, terminalKind := responseFromTerminalError(collectErr)
+		if len(terminalResponse) != 0 {
+			metrics.terminal(terminalResponse, terminalKind)
+		}
+		metrics.failureForError("stream_aggregation", collectErr)
 		s.writeCollectError(writer, collectErr)
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": statusForCollectError(collectErr), "error": debuglog.Error(collectErr)})
-		s.logSummary(requestID, started, firstEvent, nil, accountIndex, promptCacheKey, sessionID)
+		s.logSummary(requestID, started, firstEvent, terminalResponse, accountIndex, promptCacheKey, sessionID)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(final)
+	if _, writeErr := writer.Write(final); writeErr != nil {
+		metrics.failureForError("client_response_write", writeErr)
+	} else {
+		metrics.complete(final)
+	}
 	s.log(requestID, "UPSTREAM_COMPLETED", map[string]any{"response": string(final)})
 	s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusOK, "mode": "aggregated", "body": string(final)})
 	s.logSummary(requestID, started, firstEvent, final, accountIndex, promptCacheKey, sessionID)
@@ -292,7 +348,7 @@ func (s *Server) sendUpstream(ctx context.Context, clientHeaders http.Header, bo
 	return s.httpClient.Do(request)
 }
 
-func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, headers http.Header, status int, requestID string) (time.Time, json.RawMessage, error) {
+func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, headers http.Header, status int, requestID string) (time.Time, json.RawMessage, string, error) {
 	for key, values := range responseHeaders(headers) {
 		for _, value := range values {
 			writer.Header().Add(key, value)
@@ -303,15 +359,17 @@ func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, heade
 	var trace *streamTrace
 	var pipeWriter *io.PipeWriter
 	var wait sync.WaitGroup
-	if s.logger != nil {
+	if s.logger != nil || s.requestLog != nil {
 		trace = &streamTrace{}
 		pipeReader, createdWriter := io.Pipe()
 		pipeWriter = createdWriter
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			trace.consume(pipeReader, func(event sse.Event) {
-				s.log(requestID, "UPSTREAM_SSE", map[string]any{"event": event.Event, "id": event.ID, "data": string(event.Data)})
+			trace.consume(pipeReader, s.maxAggregate, func(event sse.Event) {
+				if s.logger != nil {
+					s.log(requestID, "UPSTREAM_SSE", map[string]any{"event": event.Event, "id": event.ID, "data": string(event.Data)})
+				}
 			})
 		}()
 	}
@@ -329,7 +387,8 @@ func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, heade
 					_ = pipeWriter.CloseWithError(writeErr)
 				}
 				wait.Wait()
-				return firstEvent, trace.finalResponse(), writeErr
+				response, kind := terminalResponseFromTrace(trace)
+				return firstEvent, response, kind, writeErr
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -337,7 +396,8 @@ func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, heade
 			if pipeWriter != nil {
 				if _, writeErr := pipeWriter.Write(chunk); writeErr != nil {
 					wait.Wait()
-					return firstEvent, trace.finalResponse(), writeErr
+					response, kind := terminalResponseFromTrace(trace)
+					return firstEvent, response, kind, writeErr
 				}
 			}
 		}
@@ -347,17 +407,20 @@ func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, heade
 				wait.Wait()
 			}
 			if errors.Is(readErr, io.EOF) {
-				if trace != nil {
-					return firstEvent, trace.finalResponse(), nil
-				}
-				return firstEvent, nil, nil
+				response, kind := terminalResponseFromTrace(trace)
+				return firstEvent, response, kind, nil
 			}
-			if trace != nil {
-				return firstEvent, trace.finalResponse(), readErr
-			}
-			return firstEvent, nil, readErr
+			response, kind := terminalResponseFromTrace(trace)
+			return firstEvent, response, kind, readErr
 		}
 	}
+}
+
+func terminalResponseFromTrace(trace *streamTrace) (json.RawMessage, string) {
+	if trace == nil {
+		return nil, ""
+	}
+	return trace.terminalResponse()
 }
 
 func (s *Server) copyUpstreamResponse(writer http.ResponseWriter, upstream *http.Response) {
@@ -381,6 +444,25 @@ func (s *Server) writeCollectError(writer http.ResponseWriter, err error) {
 		return
 	}
 	writeError(writer, statusForCollectError(err), "upstream SSE aggregation failed: "+debuglog.Error(err))
+}
+
+func responseFromTerminalError(err error) (json.RawMessage, string) {
+	var terminal *sse.TerminalError
+	if !errors.As(err, &terminal) {
+		return nil, ""
+	}
+	var envelope struct {
+		Type     string          `json:"type"`
+		Response json.RawMessage `json:"response"`
+	}
+	if json.Unmarshal(terminal.Data, &envelope) != nil || len(bytes.TrimSpace(envelope.Response)) == 0 {
+		return nil, terminal.Kind
+	}
+	kind := envelope.Type
+	if kind == "" {
+		kind = terminal.Kind
+	}
+	return append(json.RawMessage(nil), envelope.Response...), kind
 }
 
 func statusForCollectError(err error) int {
@@ -693,15 +775,27 @@ func usageFieldState(values map[string]json.RawMessage, key string) map[string]a
 }
 
 type streamTrace struct {
-	mu        sync.Mutex
-	completed json.RawMessage
+	mu           sync.Mutex
+	terminal     json.RawMessage
+	terminalKind string
 }
 
-func (t *streamTrace) consume(reader io.Reader, onEvent func(sse.Event)) {
-	parser := sse.NewParser(reader, 0)
+func (t *streamTrace) consume(reader io.Reader, maxEventBytes int64, onEvent func(sse.Event)) {
+	parser := sse.NewParser(reader, maxEventBytes)
 	for {
 		event, err := parser.Next()
 		if err != nil {
+			if errors.Is(err, sse.ErrEventTooLarge) {
+				// Parser.Next has consumed this event through its blank-line
+				// boundary, so tracing can safely resume at the next event.
+				continue
+			}
+			// Tracing is observational. If the side-channel parser cannot
+			// understand an event, keep draining its pipe so a malformed event
+			// never interrupts the byte-for-byte client stream.
+			if !errors.Is(err, io.EOF) {
+				_, _ = io.Copy(io.Discard, reader)
+			}
 			return
 		}
 		onEvent(event)
@@ -714,22 +808,32 @@ func (t *streamTrace) consume(reader io.Reader, onEvent func(sse.Event)) {
 			if envelope.Type != "" {
 				kind = envelope.Type
 			}
-			if kind == "response.completed" && len(envelope.Response) > 0 {
+			if isTerminalResponseEvent(kind) && len(envelope.Response) > 0 {
 				t.mu.Lock()
-				t.completed = append(t.completed[:0], envelope.Response...)
+				t.terminal = append(t.terminal[:0], envelope.Response...)
+				t.terminalKind = kind
 				t.mu.Unlock()
 			}
 		}
 	}
 }
 
-func (t *streamTrace) finalResponse() json.RawMessage {
+func isTerminalResponseEvent(kind string) bool {
+	switch kind {
+	case "response.completed", "response.failed", "response.incomplete", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *streamTrace) terminalResponse() (json.RawMessage, string) {
 	if t == nil {
-		return nil
+		return nil, ""
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append(json.RawMessage(nil), t.completed...)
+	return append(json.RawMessage(nil), t.terminal...), t.terminalKind
 }
 
 // NewHTTPClient is shared by the command and uses transport settings suitable
