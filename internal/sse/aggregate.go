@@ -29,8 +29,8 @@ type Collector struct {
 }
 
 // Collect chooses the final response.completed.response JSON object verbatim.
-// It reconstructs only a missing output field from item.done events, and only
-// when a completed event is still present.
+// It reconstructs an absent, null, or empty output field from item.done events,
+// and only when a completed event is still present.
 func (c Collector) Collect(reader io.Reader) (json.RawMessage, error) {
 	counted := &countingReader{reader: reader, limit: c.MaxBytes}
 	parser := NewParser(counted, c.MaxBytes)
@@ -88,7 +88,7 @@ func (c Collector) Collect(reader io.Reader) (json.RawMessage, error) {
 			if !isJSONObject(envelope.Response) {
 				return nil, fmt.Errorf("%w: response.completed does not contain a response object", ErrProtocol)
 			}
-			return addMissingOutput(envelope.Response, outputItems)
+			return addFallbackOutput(envelope.Response, outputItems)
 		case "response.failed", "response.incomplete", "error":
 			return nil, &TerminalError{Kind: kind, Data: append(json.RawMessage(nil), event.Data...)}
 		}
@@ -128,7 +128,7 @@ func isJSONObject(value json.RawMessage) bool {
 	return len(bytes.TrimSpace(value)) > 1 && bytes.TrimSpace(value)[0] == '{' && json.Valid(value)
 }
 
-func addMissingOutput(response json.RawMessage, items []json.RawMessage) (json.RawMessage, error) {
+func addFallbackOutput(response json.RawMessage, items []json.RawMessage) (json.RawMessage, error) {
 	if len(items) == 0 {
 		return append(json.RawMessage(nil), response...), nil
 	}
@@ -136,7 +136,7 @@ func addMissingOutput(response json.RawMessage, items []json.RawMessage) (json.R
 	if err := json.Unmarshal(response, &object); err != nil {
 		return nil, fmt.Errorf("%w: decode completed response: %v", ErrProtocol, err)
 	}
-	if existing, found := object["output"]; found && string(bytes.TrimSpace(existing)) != "null" {
+	if existing, found := object["output"]; found && !isMissingOrEmptyOutput(existing) {
 		return append(json.RawMessage(nil), response...), nil
 	}
 	output, err := json.Marshal(items)
@@ -149,4 +149,13 @@ func addMissingOutput(response json.RawMessage, items []json.RawMessage) (json.R
 		return nil, fmt.Errorf("%w: encode completed response: %v", ErrProtocol, err)
 	}
 	return completed, nil
+}
+
+func isMissingOrEmptyOutput(value json.RawMessage) bool {
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 || bytes.Equal(value, []byte("null")) {
+		return true
+	}
+	var output []json.RawMessage
+	return json.Unmarshal(value, &output) == nil && output != nil && len(output) == 0
 }

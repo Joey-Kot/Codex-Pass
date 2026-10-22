@@ -80,6 +80,30 @@ func TestCollectorCompletedAndFallbackOutput(t *testing.T) {
 	}
 }
 
+func TestCollectorReconstructsExplicitlyEmptyOutput(t *testing.T) {
+	stream := "event: response.output_item.done\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"item_1\",\"type\":\"message\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"1 + 1 = 2.\"}]}}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[]}}\n\n"
+	result, err := (Collector{MaxBytes: 1 << 20}).Collect(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Output) != 1 || len(response.Output[0].Content) != 1 || response.Output[0].Content[0].Text != "1 + 1 = 2." {
+		t.Fatalf("empty output was not reconstructed: %s", result)
+	}
+}
+
 func TestCollectorFailureAndInterruptedStream(t *testing.T) {
 	failure := "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n"
 	_, err := (Collector{}).Collect(strings.NewReader(failure))
