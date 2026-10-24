@@ -81,7 +81,7 @@ type Recorder interface {
 
 // Store owns the SQLite connection used by a proxy process. database/sql is
 // limited to one connection so concurrent proxy requests serialize writes;
-// WAL still allows a separate --summary process to read the database.
+// WAL still allows separate sum and req processes to read the database.
 type Store struct {
 	db   *sql.DB
 	path string
@@ -95,7 +95,7 @@ func Open(directory string) (*Store, error) {
 	return open(directory, true)
 }
 
-// OpenExisting opens an existing database for --summary. It refuses to create
+// OpenExisting opens an existing database for sum or req. It refuses to create
 // an empty database so a misspelled --log directory cannot look like zero use.
 func OpenExisting(directory string) (*Store, error) {
 	path, err := databasePath(directory)

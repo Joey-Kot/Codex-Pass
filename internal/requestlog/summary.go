@@ -12,7 +12,7 @@ type Summary struct {
 	ByModel []ModelAggregate
 }
 
-// Aggregate is the set of counters displayed by --summary.
+// Aggregate is the set of counters displayed by sum and req.
 type Aggregate struct {
 	Requests    int64
 	Successes   int64
@@ -33,10 +33,26 @@ type ModelAggregate struct {
 	Aggregate
 }
 
+// RequestUsage contains only the fields needed to price one request. Nil token
+// fields preserve missing usage values rather than treating them as zero.
+type RequestUsage struct {
+	Model           string
+	InputTokens     *int64
+	CacheReadTokens *int64
+	OutputTokens    *int64
+}
+
 // Summary calculates both the global and per-model aggregates in one
 // consistent time range. The range filters on request start time.
 func (s *Store) Summary(timeRange TimeRange) (Summary, error) {
-	where, arguments, err := summaryWhere(timeRange)
+	return s.SummaryWithUsage(timeRange, nil)
+}
+
+// SummaryWithUsage also visits each matching request's usage in the same read
+// snapshot, without retaining request rows or sorting them. A nil visitor skips
+// the usage scan. The visitor must not query the same Store while it is running.
+func (s *Store) SummaryWithUsage(timeRange TimeRange, visit func(RequestUsage) error) (Summary, error) {
+	where, arguments, err := requestLogWhere(timeRange)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -46,6 +62,47 @@ func (s *Store) Summary(timeRange TimeRange) (Summary, error) {
 	}
 	defer tx.Rollback()
 
+	result, err := querySummary(tx, where, arguments)
+	if err != nil {
+		return Summary{}, err
+	}
+	if visit != nil {
+		if err := visitRequestUsage(tx, where, arguments, visit); err != nil {
+			return Summary{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Summary{}, fmt.Errorf("commit request log summary transaction: %w", err)
+	}
+	return result, nil
+}
+
+func visitRequestUsage(tx *sql.Tx, where string, arguments []any, visit func(RequestUsage) error) error {
+	rows, err := tx.Query(`SELECT COALESCE(model, '(unknown)'), input_tokens, cache_read_tokens, output_tokens
+		FROM request_logs`+where, arguments...)
+	if err != nil {
+		return fmt.Errorf("query request usage: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var usage RequestUsage
+		if err := rows.Scan(&usage.Model, &usage.InputTokens, &usage.CacheReadTokens, &usage.OutputTokens); err != nil {
+			return fmt.Errorf("scan request usage: %w", err)
+		}
+		if err := visit(usage); err != nil {
+			return fmt.Errorf("process request usage: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate request usage: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close request usage: %w", err)
+	}
+	return nil
+}
+
+func querySummary(tx *sql.Tx, where string, arguments []any) (Summary, error) {
 	query := `SELECT ` + aggregateColumns + ` FROM request_logs` + where
 	var total Aggregate
 	if err := tx.QueryRow(query, arguments...).Scan(aggregateDestinations(&total)...); err != nil {
@@ -71,9 +128,6 @@ func (s *Store) Summary(timeRange TimeRange) (Summary, error) {
 	}
 	if err := rows.Close(); err != nil {
 		return Summary{}, fmt.Errorf("close request log model totals: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return Summary{}, fmt.Errorf("commit request log summary transaction: %w", err)
 	}
 	return result, nil
 }
@@ -105,7 +159,7 @@ func aggregateDestinations(target *Aggregate) []any {
 	}
 }
 
-func summaryWhere(timeRange TimeRange) (string, []any, error) {
+func requestLogWhere(timeRange TimeRange) (string, []any, error) {
 	if timeRange.All {
 		return "", nil, nil
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	relativeTimePattern = regexp.MustCompile(`^([1-9][0-9]*)([dwmy])$`)
+	relativeTimePattern = regexp.MustCompile(`^([1-9][0-9]*)([mhdwMy])$`)
 	datePattern         = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 	timestampPattern    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}$`)
 )
@@ -43,11 +43,15 @@ func ParseTimeRange(value string, now time.Time) (TimeRange, error) {
 		var start time.Time
 		var rangeErr error
 		switch match[2] {
+		case "m":
+			start, rangeErr = subtractRelativeDuration(end, amount, time.Minute)
+		case "h":
+			start, rangeErr = subtractRelativeDuration(end, amount, time.Hour)
 		case "d":
 			start, rangeErr = subtractRelativeDuration(end, amount, 24*time.Hour)
 		case "w":
 			start, rangeErr = subtractRelativeDuration(end, amount, 7*24*time.Hour)
-		case "m":
+		case "M":
 			start, rangeErr = subtractCalendarMonths(localNow, amount)
 		case "y":
 			start, rangeErr = subtractCalendarYears(localNow, amount)
@@ -60,7 +64,7 @@ func ParseTimeRange(value string, now time.Time) (TimeRange, error) {
 
 	parts := strings.Split(value, ",")
 	if len(parts) != 2 {
-		return TimeRange{}, errors.New("time range must be START,END or a relative value such as 2d")
+		return TimeRange{}, errors.New("time range must be START,END or a relative value such as 2m/1h/2d/1w/3M/1y (m: minutes, M: calendar months)")
 	}
 	start, err := parseTimeBoundary(strings.TrimSpace(parts[0]), false)
 	if err != nil {

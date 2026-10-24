@@ -135,7 +135,7 @@ func TestPrintSummaryWithHumanReadableNumbers(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	printSummaryWithOptions(&output, "all", summary, true)
+	printSummaryWithOptions(&output, "all", summary, true, nil)
 	got := output.String()
 	for _, value := range []string{"1.27K", "2.41M", "2.34B", "1K"} {
 		if !strings.Contains(got, value) {
@@ -157,7 +157,7 @@ func TestRunSummaryReportsMissingDatabase(t *testing.T) {
 	}
 }
 
-func TestSummaryModeDoesNotRequireKeyOrAuthFile(t *testing.T) {
+func TestQueryCommandsDoNotRequireKeyOrAuthFile(t *testing.T) {
 	directory := t.TempDir()
 	store, err := requestlog.Open(directory)
 	if err != nil {
@@ -166,7 +166,17 @@ func TestSummaryModeDoesNotRequireKeyOrAuthFile(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{"--log", directory, "--summary"}); code != 0 {
-		t.Fatalf("summary mode code = %d, want 0", code)
+	for _, arguments := range [][]string{
+		{"sum", "--log", directory},
+		{"--log", directory, "sum"},
+		{"--time", "1h", "sum", "--log", directory, "--human"},
+		{"req", "--log", directory},
+		{"--log", directory, "req", "--asc"},
+		{"--time", "2m", "req", "--log", directory, "--human", "--desc"},
+		{"req", "--log", directory, "--num", "10"},
+	} {
+		if code := run(arguments); code != 0 {
+			t.Fatalf("run(%q) code = %d, want 0", arguments, code)
+		}
 	}
 }

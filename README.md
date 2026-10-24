@@ -52,27 +52,89 @@ go build -o codex-pass ./cmd/codex-pass
 - 失败：未正常完成且不属于取消，例如上游错误、网络中断、SSE 提前结束、响应解析失败或转换失败。
 - 未结束：进程异常停止前已经开始、但尚未写入最终状态的记录。
 
-使用 `--summary` 查询数据库，不会启动代理，也不要求 `--key` 或 Auth File：
+使用 `sum` 子命令查询数据库，不会启动代理，也不要求 `--key` 或 Auth File：
 
 ```bash
-./codex-pass --log ./usage --summary
-./codex-pass --log ./usage --summary --time 2026-06-09,2026-10-10
-./codex-pass --log ./usage --summary --time 2026-06-09-10-00,2026-10-10-08-45
-./codex-pass --log ./usage --summary --time 2d
-./codex-pass --log ./usage --summary --human
+./codex-pass sum --log ./usage
+./codex-pass sum --log ./usage --time 2026-06-09,2026-10-10
+./codex-pass sum --log ./usage --time 2026-06-09-10-00,2026-10-10-08-45
+./codex-pass sum --log ./usage --time 2m
+./codex-pass sum --log ./usage --time 1h
+./codex-pass sum --log ./usage --time 2d
+./codex-pass sum --log ./usage --time 1M
+./codex-pass sum --log ./usage --human
+./codex-pass --log ./usage --time 1h sum --human
 ```
 
-汇总会输出全部请求的成功、失败、取消、未结束次数，以及输入、缓存写入、缓存读取、输出、思考 Token；同一组指标也会按模型分别输出。`--summary` 指向不存在的数据库会报错，避免目录拼写错误时得到空统计。
+`--log`、`--time`、`--human`、`--price` 是公共参数，可放在 `sum` 或 `req` 前后；重复指定时以后面的值为准。两个查询命令都必须提供 `--log DIR`。`sum` 暂无专属参数，`req` 的专属排序和数量参数见下文。使用 `./codex-pass --help` 查看全部命令和参数，使用 `./codex-pass sum --help` 或 `./codex-pass req --help` 查看对应命令帮助。
 
-`--human` 仅可与 `--summary` 一起使用，会将两张汇总表中的数字按紧凑单位显示，最多保留两位小数，例如 `1.27K`、`2.41M`、`2.34B`。
+汇总会输出全部请求的成功、失败、取消、未结束次数，以及输入、缓存写入、缓存读取、输出、思考 Token；同一组指标也会按模型分别输出。`sum` 或 `req` 指向不存在的数据库会报错，避免目录拼写错误时得到空统计。
 
-`--time` 仅可与 `--summary` 一起使用，按请求开始时间过滤：
+`--time` 和 `--human` 用于汇总与请求明细查询。`--human` 会将请求次数和 Token 数按紧凑单位显示，最多保留两位小数，例如 `1.27K`、`2.41M`、`2.34B`；请求明细中括号内外的 Token 数都会转换。
+
+`--time` 按请求开始时间过滤：
 
 - `YYYY-MM-DD,YYYY-MM-DD`：按运行机器的本地时区解释，包含首日和末日的整天。
 - `YYYY-MM-DD-HH-MM,YYYY-MM-DD-HH-MM`：精确到分钟，包含结束分钟。
-- `2d`、`1w`、`3m`、`1y`：从执行命令时刻向前回溯到当前时刻；`m` 和 `y` 分别按日历月和日历年计算。
+- `2m`、`1h`、`2d`、`1w`、`3M`、`1y`：从执行命令时刻向前回溯到当前时刻，数量必须为正整数。单位区分大小写：`m` 表示分钟，`h` 表示小时，`d` 表示天（24 小时），`w` 表示周（7 天），`M` 和 `y` 分别按日历月和日历年计算。`1m` 表示最近 1 分钟，`1M` 表示最近 1 个月；原来表示月份的小写 `m` 请改为大写 `M`。
 
-数据库内部使用 UTC Unix 毫秒保存请求时间。SQLite 启用 WAL，因此代理运行时可以执行独立的 `--summary` 查询。
+使用 `req` 查看时间范围内的每一条请求：
+
+```bash
+./codex-pass req --log ./usage --time 1h --human
+./codex-pass --log ./usage --time 2m req --asc
+./codex-pass req --log ./usage --time 1M --desc --human
+./codex-pass req --log ./usage --num 20
+./codex-pass req --log ./usage --time 1h --num 50 --human
+```
+
+`req` 输出两张英文表格：第一张 `Request Counts` 包含实际选中请求的全局及按模型统计，不限制条数时与同一时间范围的 `sum` 请求次数表一致；第二张 `Request Logs` 列出以下字段：
+
+| 列名 | 内容 |
+| --- | --- |
+| `Request time` | 将开始时间的 Unix 毫秒时间戳转换为运行机器本地时间，格式为 `YYYY-MM-DD HH:mm:ss`。 |
+| `Time taken` | 结束时间减开始时间；不足 1 分钟显示秒，否则显示分钟，均最多保留 2 位小数，如 `1.45 seconds`、`1.45 minutes`。 |
+| `Model` | 模型名，未知时显示 `(unknown)`。 |
+| `Input` | 输入 Token 数，括号内为缓存命中 Token 数，如 `56.51K ( 49.52K )`。 |
+| `Output` | 输出 Token 数，括号内为思考 Token 数，如 `500 ( 200 )`。 |
+| `Cache hit` | 缓存命中 Token 数 ÷ 输入 Token 数，以百分比显示，保留 2 位小数。 |
+
+默认按请求开始时间降序排列，最近的请求在前。`req --asc` 改为升序，`req --desc` 显式指定降序；这两个专属参数放在 `req` 后面，不能同时启用。时间戳相同时按请求 ID 确定顺序。
+
+`req --num N` 最多输出 N 条请求，N 必须为正整数，此专属参数放在 `req` 后面。查询先按 `--time` 筛选，再按指定顺序取前 N 条；默认取最近 N 条，配合 `--asc` 时取最早 N 条。只指定 `--num`、不指定 `--time` 时，默认从全部日志中选取最近 N 条。匹配记录不足 N 条时全部输出；未指定 `--num` 时不限制条数，未指定 `--time` 时不限制时间范围。
+
+指定 `--num` 后，`Request Counts`、模型费用和 `Sum` 金额均只统计实际选中的请求，报告标题会显示数量上限。
+
+未结束请求的耗时、缺失的 Token 数，以及输入 Token 为零或数据缺失时的缓存命中率显示 `-`。没有匹配请求时，次数表显示零，日志表保留表头。
+
+数据库内部使用 UTC Unix 毫秒保存请求时间。SQLite 启用 WAL，因此代理运行时可以执行独立的 `sum` 或 `req` 查询。`req` 的两张表从同一数据库快照读取，确保请求次数与明细一致。
+
+### 价格表与费用估算
+
+传入 `--price FILE`，按指定 JSON 价格表计算所选时间范围的费用：
+
+```bash
+./codex-pass sum --log ./usage --time 1M --price ./prices.example.json --human
+./codex-pass --price ./prices.example.json req --log ./usage --time 1h --human
+```
+
+价格表格式见 [prices.example.json](prices.example.json)，示例使用用户提供的数值。必填字段为 `currency`、`unit`、`service_tier`、`context_threshold`、`models`。目前 `unit` 支持 `per_token`；`context_threshold` 必须为正整数。每个模型都需提供 `short_context`、`long_context`，两者均包含非负 JSON 数字 `input`、`cached_input`、`output`，允许单价为零。模型名与日志中的模型名精确匹配。
+
+每条请求按输入 Token 总数（包含缓存命中 Token）选择价格：小于或等于 `context_threshold` 使用 `short_context`，超过阈值使用 `long_context`。先逐条计算，再按模型及全局合计，费用公式为：
+
+`Price = (Input - Cached input) × input + Cached input × cached_input + Output × output`
+
+缓存写入 Token 使用普通输入价格，已包含在输入 Token 中；思考 Token 已包含在输出 Token 中，两者都不额外累加费用。`service_tier` 标识所选价格表的档位，并显示在查询输出中；当前日志未记录每条请求的服务档位，因此所有选中请求统一按该文件估算。
+
+指定 `--price` 后，以下三张表末尾增加 `Price` 列，底部增加 `Sum` 行，仅合计金额：
+
+- `sum` 的 `Token Usage`：显示每个模型及全部模型的费用。
+- `req` 的 `Request Counts`：显示每个模型及全部模型的费用。
+- `req` 的 `Request Logs`：显示每条请求的费用。
+
+`Sum` 从请求明细合计，已有的 `All models` 行不会被重复计入。费用以精确十进制计算，仅在显示时四舍五入：小于 `1` 的金额最多保留五位小数，大于或等于 `1` 的金额最多保留三位小数，至少保留两位小数，例如 `USD 0.18915`、`USD 261.165`。`Price` 列显示币种和金额，并左对齐。`--human` 继续格式化请求次数和 Token 数，金额保持十进制显示。
+
+价格表缺少模型，或请求缺少输入、缓存命中、输出 Token 等计费用量时，单条费用显示 `-`。缓存命中 Token 超过输入 Token 等无效数据同样不计价。模型和总计仅累加可计算的请求，存在缺失项时标注 `(partial)`，并在表格后注明未能计价的请求数量；全部无法计价时显示 `- (partial)`。没有匹配请求时合计为零。价格文件无法读取、JSON 无效或必填字段不符合格式时，命令报错。
 
 ## 调用示例
 

@@ -1,0 +1,105 @@
+
+{
+  "currency": "USD",
+  "unit": "per_token",
+  "service_tier": "standard",
+  "context_threshold": 272000,
+  "models": {
+    "gpt-6-astra": {
+      "short_context": {
+        "input": 0.00001,
+        "cached_input": 0.000001,
+        "output": 0.00005
+      },
+      "long_context": {
+        "input": 0.00002,
+        "cached_input": 0.000002,
+        "output": 0.000075
+      }
+    },
+    "gpt-6.1-sol": {
+      "short_context": {
+        "input": 0.000002,
+        "cached_input": 0.0000001,
+        "output": 0.00001
+      },
+      "long_context": {
+        "input": 0.000004,
+        "cached_input": 0.0000002,
+        "output": 0.000015
+      }
+    },
+    "gpt-6-sol": {
+      "short_context": {
+        "input": 0.000002,
+        "cached_input": 0.0000002,
+        "output": 0.00001
+      },
+      "long_context": {
+        "input": 0.000004,
+        "cached_input": 0.0000004,
+        "output": 0.000015
+      }
+    },
+    "gpt-6-luna": {
+      "short_context": {
+        "input": 0.0000001,
+        "cached_input": 0.00000001,
+        "output": 0.0000005
+      },
+      "long_context": {
+        "input": 0.0000002,
+        "cached_input": 0.00000002,
+        "output": 0.00000075
+      }
+    },
+    "gpt-5.6-sol": {
+      "short_context": {
+        "input": 0.000004,
+        "cached_input": 0.0000004,
+        "output": 0.00002
+      },
+      "long_context": {
+        "input": 0.000008,
+        "cached_input": 0.0000008,
+        "output": 0.00003
+      }
+    },
+    "gpt-5.6-terra": {
+      "short_context": {
+        "input": 0.000002,
+        "cached_input": 0.0000002,
+        "output": 0.000012
+      },
+      "long_context": {
+        "input": 0.000004,
+        "cached_input": 0.0000004,
+        "output": 0.000018
+      }
+    },
+    "gpt-5.6-luna": {
+      "short_context": {
+        "input": 0.0000002,
+        "cached_input": 0.00000002,
+        "output": 0.0000012
+      },
+      "long_context": {
+        "input": 0.0000004,
+        "cached_input": 0.00000004,
+        "output": 0.0000018
+      }
+    },
+    "gpt-5.5": {
+      "short_context": {
+        "input": 0.000005,
+        "cached_input": 0.0000005,
+        "output": 0.00003
+      },
+      "long_context": {
+        "input": 0.00001,
+        "cached_input": 0.000001,
+        "output": 0.000045
+      }
+    }
+  }
+}

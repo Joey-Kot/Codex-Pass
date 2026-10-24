@@ -35,6 +35,31 @@ func TestParseTimeRange(t *testing.T) {
 			wantEnd:   time.Date(2026, time.October, 10, 8, 46, 0, 0, location),
 		},
 		{
+			input:     "1m",
+			wantStart: now.Add(-time.Minute),
+			wantEnd:   now.Add(time.Millisecond),
+		},
+		{
+			input:     "2m",
+			wantStart: now.Add(-2 * time.Minute),
+			wantEnd:   now.Add(time.Millisecond),
+		},
+		{
+			input:     "100001m",
+			wantStart: now.Add(-100001 * time.Minute),
+			wantEnd:   now.Add(time.Millisecond),
+		},
+		{
+			input:     "1h",
+			wantStart: now.Add(-time.Hour),
+			wantEnd:   now.Add(time.Millisecond),
+		},
+		{
+			input:     "2h",
+			wantStart: now.Add(-2 * time.Hour),
+			wantEnd:   now.Add(time.Millisecond),
+		},
+		{
 			input:     "2d",
 			wantStart: now.Add(-48 * time.Hour),
 			wantEnd:   now.Add(time.Millisecond),
@@ -45,7 +70,12 @@ func TestParseTimeRange(t *testing.T) {
 			wantEnd:   now.Add(time.Millisecond),
 		},
 		{
-			input:     "3m",
+			input:     "1M",
+			wantStart: now.AddDate(0, -1, 0),
+			wantEnd:   now.Add(time.Millisecond),
+		},
+		{
+			input:     "3M",
 			wantStart: now.AddDate(0, -3, 0),
 			wantEnd:   now.Add(time.Millisecond),
 		},
@@ -70,15 +100,23 @@ func TestParseTimeRange(t *testing.T) {
 
 func TestParseTimeRangeRejectsInvalidInput(t *testing.T) {
 	for _, input := range []string{
+		"0m",
+		"0h",
 		"0d",
-		"2h",
+		"0M",
+		"-1m",
+		"1.5h",
+		"1H",
+		"2s",
 		"2026-10-10",
 		"2026-10-10,2026-06-09",
 		"2026-13-01,2026-10-10",
 		"2026-10-10-10-00,not-a-time",
+		"153722868m",
+		"2562048h",
 		"106752d",
 		"15251w",
-		"100001m",
+		"100001M",
 		"100001y",
 	} {
 		if _, err := ParseTimeRange(input, time.Now()); err == nil {
@@ -97,7 +135,7 @@ func TestParseTimeRangeClampsCalendarBoundaries(t *testing.T) {
 	}{
 		{
 			name:      "month end",
-			input:     "1m",
+			input:     "1M",
 			now:       time.Date(2026, time.March, 31, 10, 30, 0, 0, location),
 			wantStart: time.Date(2026, time.February, 28, 10, 30, 0, 0, location),
 		},

@@ -26,60 +26,24 @@ func main() {
 }
 
 func run(arguments []string) int {
-	flags := flag.NewFlagSet("codex-pass", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: codex-pass --key API_KEY [--listen ADDRESS] [--debug FILE] [--log DIR] AUTH_FILE [AUTH_FILE ...]")
-		fmt.Fprintln(flags.Output(), "       codex-pass --log DIR --summary [--time RANGE] [--human]")
-		fmt.Fprintln(flags.Output(), "\nTransparent Codex Responses API proxy listening on 127.0.0.1:8317 by default.")
-		flags.PrintDefaults()
-	}
-	apiKey := flags.String("key", "", "required client Bearer API key")
-	debugPath := flags.String("debug", "", "optional JSON Lines debug log path")
-	logDirectory := flags.String("log", "", "optional directory for SQLite request usage logging")
-	summaryMode := flags.Bool("summary", false, "print SQLite request usage summary and exit (requires --log)")
-	timeRangeValue := flags.String("time", "", "summary range: START,END or 2d/1w/3m/1y (requires --summary)")
-	humanReadable := flags.Bool("human", false, "format summary table numbers with compact K/M/B units (requires --summary)")
-	listen := flags.String("listen", "", "listen address (overrides CODEX_PROXY_LISTEN)")
-	if err := flags.Parse(arguments); err != nil {
+	options, err := parseCommandLine(arguments, os.Stderr)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if *summaryMode {
-		if strings.TrimSpace(*logDirectory) == "" {
-			fmt.Fprintln(os.Stderr, "error: --summary requires --log DIR")
-			flags.Usage()
-			return 2
-		}
-		if len(flags.Args()) != 0 {
-			fmt.Fprintln(os.Stderr, "error: --summary does not accept auth files")
-			return 2
-		}
-		return runSummaryWithOptions(*logDirectory, *timeRangeValue, *humanReadable, os.Stdout, os.Stderr)
+	switch options.command {
+	case "sum":
+		return runSummaryWithOptions(options.common, os.Stdout, os.Stderr)
+	case "req":
+		return runRequestLogs(options.common, options.request, os.Stdout, os.Stderr)
+	default:
+		return runProxy(options.common, options.proxy, options.authFiles)
 	}
-	if strings.TrimSpace(*timeRangeValue) != "" {
-		fmt.Fprintln(os.Stderr, "error: --time requires --summary")
-		flags.Usage()
-		return 2
-	}
-	if *humanReadable {
-		fmt.Fprintln(os.Stderr, "error: --human requires --summary")
-		flags.Usage()
-		return 2
-	}
-	if strings.TrimSpace(*apiKey) == "" {
-		fmt.Fprintln(os.Stderr, "error: --key is required")
-		flags.Usage()
-		return 2
-	}
-	authFiles := flags.Args()
-	if len(authFiles) == 0 {
-		fmt.Fprintln(os.Stderr, "error: at least one Codex auth file is required")
-		flags.Usage()
-		return 2
-	}
+}
+
+func runProxy(common commonOptions, options proxyOptions, authFiles []string) int {
 	credentials, err := auth.LoadAll(authFiles)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -92,8 +56,8 @@ func run(arguments []string) int {
 		return 2
 	}
 	var logger *debuglog.Logger
-	if *debugPath != "" {
-		logger, err = debuglog.New(*debugPath)
+	if options.debugPath != "" {
+		logger, err = debuglog.New(options.debugPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 2
@@ -105,8 +69,8 @@ func run(arguments []string) int {
 		}()
 	}
 	var usageLog *requestlog.Store
-	if strings.TrimSpace(*logDirectory) != "" {
-		usageLog, err = requestlog.Open(*logDirectory)
+	if strings.TrimSpace(common.logDirectory) != "" {
+		usageLog, err = requestlog.Open(common.logDirectory)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 2
@@ -118,13 +82,13 @@ func run(arguments []string) int {
 		}()
 	}
 	handler, err := proxy.New(proxy.Config{
-		APIKey: *apiKey, AuthPool: pool, HTTPClient: httpClient, Logger: logger, RequestLog: usageLog,
+		APIKey: options.apiKey, AuthPool: pool, HTTPClient: httpClient, Logger: logger, RequestLog: usageLog,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
 	}
-	listenAddress := resolveListenAddress(*listen, os.Getenv("CODEX_PROXY_LISTEN"))
+	listenAddress := resolveListenAddress(options.listen, os.Getenv("CODEX_PROXY_LISTEN"))
 	if !isLoopbackAddress(listenAddress) {
 		fmt.Fprintln(os.Stderr, "warning: listen address is not loopback; put TLS, access control, and protected debug logs in front of this proxy")
 	}
@@ -138,7 +102,7 @@ func run(arguments []string) int {
 	}
 	log.Printf("codex-pass listening on http://%s with %d auth file(s)", listenAddress, len(credentials))
 	if logger != nil {
-		log.Printf("detailed debug logging enabled at %s", *debugPath)
+		log.Printf("detailed debug logging enabled at %s", options.debugPath)
 	}
 	if usageLog != nil {
 		log.Printf("request usage logging enabled at %s", usageLog.Path())
@@ -165,16 +129,21 @@ func run(arguments []string) int {
 }
 
 func runSummary(logDirectory, timeRangeValue string, output, errorOutput io.Writer) int {
-	return runSummaryWithOptions(logDirectory, timeRangeValue, false, output, errorOutput)
+	return runSummaryWithOptions(commonOptions{logDirectory: logDirectory, timeRange: timeRangeValue}, output, errorOutput)
 }
 
-func runSummaryWithOptions(logDirectory, timeRangeValue string, humanReadable bool, output, errorOutput io.Writer) int {
-	timeRange, err := requestlog.ParseTimeRange(timeRangeValue, time.Now())
+func runSummaryWithOptions(options commonOptions, output, errorOutput io.Writer) int {
+	timeRange, err := requestlog.ParseTimeRange(options.timeRange, time.Now())
 	if err != nil {
 		fmt.Fprintln(errorOutput, "error: invalid --time:", err)
 		return 2
 	}
-	store, err := requestlog.OpenExisting(logDirectory)
+	table, err := loadPriceTable(options.priceFile)
+	if err != nil {
+		fmt.Fprintln(errorOutput, "error:", err)
+		return 2
+	}
+	store, err := requestlog.OpenExisting(options.logDirectory)
 	if err != nil {
 		fmt.Fprintln(errorOutput, "error:", err)
 		return 2
@@ -184,44 +153,61 @@ func runSummaryWithOptions(logDirectory, timeRangeValue string, humanReadable bo
 			fmt.Fprintln(errorOutput, "request log error:", closeErr)
 		}
 	}()
-	summary, err := store.Summary(timeRange)
+	var summary requestlog.Summary
+	var prices *reportPrices
+	if table == nil {
+		summary, err = store.Summary(timeRange)
+	} else {
+		prices = newReportPrices(table)
+		summary, err = store.SummaryWithUsage(timeRange, func(usage requestlog.RequestUsage) error {
+			prices.addUsage(usage)
+			return nil
+		})
+	}
 	if err != nil {
 		fmt.Fprintln(errorOutput, "error:", err)
 		return 1
 	}
-	printSummaryWithOptions(output, strings.TrimSpace(timeRangeValue), summary, humanReadable)
+	printSummaryWithOptions(output, strings.TrimSpace(options.timeRange), summary, options.humanReadable, prices)
 	return 0
 }
 
 func printSummary(output io.Writer, timeRangeValue string, summary requestlog.Summary) {
-	printSummaryWithOptions(output, timeRangeValue, summary, false)
+	printSummaryWithOptions(output, timeRangeValue, summary, false, nil)
 }
 
-func printSummaryWithOptions(output io.Writer, timeRangeValue string, summary requestlog.Summary, humanReadable bool) {
+func printSummaryWithOptions(output io.Writer, timeRangeValue string, summary requestlog.Summary, humanReadable bool, prices *reportPrices) {
 	if timeRangeValue == "" {
 		timeRangeValue = "all"
 	}
 	fmt.Fprintf(output, "Usage Summary (Range: %s)\n\n", timeRangeValue)
+	printPriceContext(output, prices)
 	numberFormatter := formatNumber
 	if humanReadable {
 		numberFormatter = formatHumanNumber
 	}
+	printRequestCounts(output, summary, numberFormatter, nil)
 
+	rows := make([][]string, 0, len(summary.ByModel)+1)
+	rows = append(rows, tokenUsageRowWithFormatter("All models", summary.Total, numberFormatter))
+	for _, model := range summary.ByModel {
+		rows = append(rows, tokenUsageRowWithFormatter(model.Model, model.Aggregate, numberFormatter))
+	}
+	fmt.Fprintln(output, "\nToken Usage")
+	headers, rows := appendModelPrices([]string{"Model", "Total", "Input", "Cache Write", "Cache Read", "Output", "Reasoning"}, rows, prices)
+	printASCIITable(output, headers, rows)
+	printPriceNote(output, prices)
+}
+
+func printRequestCounts(output io.Writer, summary requestlog.Summary, numberFormatter func(int64) string, prices *reportPrices) {
 	rows := make([][]string, 0, len(summary.ByModel)+1)
 	rows = append(rows, requestCountRowWithFormatter("All models", summary.Total, numberFormatter))
 	for _, model := range summary.ByModel {
 		rows = append(rows, requestCountRowWithFormatter(model.Model, model.Aggregate, numberFormatter))
 	}
 	fmt.Fprintln(output, "Request Counts")
-	printASCIITable(output, []string{"Model", "Requests", "Success", "Failed", "Canceled", "Unfinished"}, rows)
-
-	rows = rows[:0]
-	rows = append(rows, tokenUsageRowWithFormatter("All models", summary.Total, numberFormatter))
-	for _, model := range summary.ByModel {
-		rows = append(rows, tokenUsageRowWithFormatter(model.Model, model.Aggregate, numberFormatter))
-	}
-	fmt.Fprintln(output, "\nToken Usage")
-	printASCIITable(output, []string{"Model", "Total", "Input", "Cache Write", "Cache Read", "Output", "Reasoning"}, rows)
+	headers, rows := appendModelPrices([]string{"Model", "Requests", "Success", "Failed", "Canceled", "Unfinished"}, rows, prices)
+	printASCIITable(output, headers, rows)
 }
 
 func requestCountRow(model string, aggregate requestlog.Aggregate) []string {
@@ -257,8 +243,10 @@ func tokenUsageRowWithFormatter(model string, aggregate requestlog.Aggregate, nu
 
 func printASCIITable(output io.Writer, headers []string, rows [][]string) {
 	widths := make([]int, len(headers))
+	rightAligned := make([]bool, len(headers))
 	for index, header := range headers {
 		widths[index] = len(header)
+		rightAligned[index] = index > 0 && header != "Price"
 	}
 	for _, row := range rows {
 		for index, cell := range row {
@@ -269,10 +257,10 @@ func printASCIITable(output io.Writer, headers []string, rows [][]string) {
 	}
 
 	printASCIITableBorder(output, widths)
-	printASCIITableRow(output, headers, widths, false)
+	printASCIITableRow(output, headers, widths, nil)
 	printASCIITableBorder(output, widths)
 	for _, row := range rows {
-		printASCIITableRow(output, row, widths, true)
+		printASCIITableRow(output, row, widths, rightAligned)
 	}
 	printASCIITableBorder(output, widths)
 }
@@ -285,7 +273,7 @@ func printASCIITableBorder(output io.Writer, widths []int) {
 	fmt.Fprintln(output)
 }
 
-func printASCIITableRow(output io.Writer, cells []string, widths []int, alignNumbers bool) {
+func printASCIITableRow(output io.Writer, cells []string, widths []int, rightAligned []bool) {
 	fmt.Fprint(output, "|")
 	for index, width := range widths {
 		cell := ""
@@ -293,7 +281,7 @@ func printASCIITableRow(output io.Writer, cells []string, widths []int, alignNum
 			cell = cells[index]
 		}
 		padding := strings.Repeat(" ", width-len(cell))
-		if alignNumbers && index > 0 {
+		if index < len(rightAligned) && rightAligned[index] {
 			fmt.Fprintf(output, " %s%s |", padding, cell)
 			continue
 		}
