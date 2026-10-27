@@ -28,28 +28,30 @@ const (
 )
 
 type Config struct {
-	APIKey       string
-	AuthPool     *auth.Pool
-	HTTPClient   *http.Client
-	UpstreamURL  string
-	Logger       *debuglog.Logger
-	RequestLog   requestlog.Recorder
-	MaxBodyBytes int64
-	MaxAggregate int64
-	UserAgent    string
+	APIKey            string
+	AuthPool          *auth.Pool
+	HTTPClient        *http.Client
+	UpstreamURL       string
+	ModelsUpstreamURL string
+	Logger            *debuglog.Logger
+	RequestLog        requestlog.Recorder
+	MaxBodyBytes      int64
+	MaxAggregate      int64
+	UserAgent         string
 }
 
 type Server struct {
-	apiKey       string
-	authPool     *auth.Pool
-	httpClient   *http.Client
-	upstreamURL  string
-	logger       *debuglog.Logger
-	requestLog   requestlog.Recorder
-	maxBodyBytes int64
-	maxAggregate int64
-	userAgent    string
-	requestSeq   atomic.Uint64
+	apiKey            string
+	authPool          *auth.Pool
+	httpClient        *http.Client
+	upstreamURL       string
+	modelsUpstreamURL string
+	logger            *debuglog.Logger
+	requestLog        requestlog.Recorder
+	maxBodyBytes      int64
+	maxAggregate      int64
+	userAgent         string
+	requestSeq        atomic.Uint64
 }
 
 func New(config Config) (*Server, error) {
@@ -65,6 +67,9 @@ func New(config Config) (*Server, error) {
 	if config.UpstreamURL == "" {
 		config.UpstreamURL = DefaultUpstreamURL
 	}
+	if config.ModelsUpstreamURL == "" {
+		config.ModelsUpstreamURL = DefaultModelsUpstreamURL
+	}
 	if config.MaxBodyBytes == 0 {
 		config.MaxBodyBytes = defaultMaxRequestBody
 	}
@@ -76,7 +81,8 @@ func New(config Config) (*Server, error) {
 	}
 	return &Server{
 		apiKey: config.APIKey, authPool: config.AuthPool, httpClient: config.HTTPClient,
-		upstreamURL: config.UpstreamURL, logger: config.Logger, requestLog: config.RequestLog, maxBodyBytes: config.MaxBodyBytes,
+		upstreamURL: config.UpstreamURL, modelsUpstreamURL: config.ModelsUpstreamURL,
+		logger: config.Logger, requestLog: config.RequestLog, maxBodyBytes: config.MaxBodyBytes,
 		maxAggregate: config.MaxAggregate, userAgent: config.UserAgent,
 	}, nil
 }
@@ -92,6 +98,12 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"status":"ok"}\n`))
 		return
+	case "/v1/models":
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 	case "/v1/responses":
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)
@@ -115,6 +127,10 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	if s.logger != nil && s.logger.Err() != nil {
 		writeError(writer, http.StatusInternalServerError, "debug logger is unavailable")
+		return
+	}
+	if request.URL.Path == "/v1/models" {
+		s.handleModels(writer, request)
 		return
 	}
 	if s.requestLog != nil && s.requestLog.Err() != nil {
@@ -298,6 +314,12 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 }
 
 func (s *Server) retryUnauthorized(ctx context.Context, clientHeaders http.Header, body []byte, credential *auth.Credential, sessionID string, first *http.Response, requestID string) *http.Response {
+	return s.retryUpstreamUnauthorized(ctx, credential, first, requestID, func() (*http.Response, error) {
+		return s.sendUpstream(ctx, clientHeaders, body, credential, sessionID, requestID)
+	})
+}
+
+func (s *Server) retryUpstreamUnauthorized(ctx context.Context, credential *auth.Credential, first *http.Response, requestID string, retry func() (*http.Response, error)) *http.Response {
 	firstHeaders := first.Header.Clone()
 	if s.logger != nil {
 		s.log(requestID, "UPSTREAM_RESPONSE_HEADERS", map[string]any{
@@ -314,7 +336,7 @@ func (s *Server) retryUnauthorized(ctx context.Context, clientHeaders http.Heade
 		}
 		return nil
 	}
-	second, err := s.sendUpstream(ctx, clientHeaders, body, credential, sessionID, requestID)
+	second, err := retry()
 	if err != nil {
 		s.log(requestID, "ERROR", map[string]any{"operation": "retry after OAuth refresh", "error": debuglog.Error(err)})
 		return nil
@@ -323,12 +345,20 @@ func (s *Server) retryUnauthorized(ctx context.Context, clientHeaders http.Heade
 }
 
 func (s *Server) sendUpstream(ctx context.Context, clientHeaders http.Header, body []byte, credential *auth.Credential, sessionID, requestID string) (*http.Response, error) {
+	return s.sendUpstreamRequest(ctx, http.MethodPost, s.upstreamURL, clientHeaders, body, credential, sessionID, requestID)
+}
+
+func (s *Server) sendUpstreamRequest(ctx context.Context, method, target string, clientHeaders http.Header, body []byte, credential *auth.Credential, sessionID, requestID string) (*http.Response, error) {
 	snapshot := credential.Snapshot()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.upstreamURL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	request.Header = cloneForwardHeaders(clientHeaders)
+	if method == http.MethodGet {
+		request.Header.Set("Accept", "application/json")
+		request.Header.Del("Content-Type")
+	}
 	request.Header.Set("Authorization", "Bearer "+snapshot.Token)
 	request.Header.Set("ChatGPT-Account-ID", snapshot.AccountID)
 	if request.Header.Get("Originator") == "" {

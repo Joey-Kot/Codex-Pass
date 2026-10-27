@@ -8,7 +8,10 @@ import (
 	"sort"
 )
 
-const DefaultUpstreamURL = "https://chatgpt.com/backend-api/codex/responses"
+const (
+	DefaultUpstreamURL       = "https://chatgpt.com/backend-api/codex/responses"
+	DefaultModelsUpstreamURL = "https://chatgpt.com/backend-api/codex/models"
+)
 
 var hopByHopHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",

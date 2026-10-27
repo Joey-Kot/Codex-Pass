@@ -1,6 +1,6 @@
 # codex-pass
 
-`codex-pass` 是一个 Codex Responses API 本地代理。代理逻辑使用 Go 标准库；可选的 SQLite 请求统计使用纯 Go SQLite 驱动，不要求 CGO 或系统 SQLite 库。它提供 `POST /v1/responses`、`POST /v1/chat/completions` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
+`codex-pass` 是一个 Codex Responses API 本地代理。代理逻辑使用 Go 标准库；可选的 SQLite 请求统计使用纯 Go SQLite 驱动，不要求 CGO 或系统 SQLite 库。它提供 `POST /v1/responses`、`POST /v1/chat/completions`、`GET /v1/models` 和 `GET /healthz`，默认监听 `127.0.0.1:8317`。
 
 `/v1/responses` 的设计目标是可审计的转发：流式请求和 SSE 内容按字节转发；非流式请求只把顶层 `stream` 改为 `true`，随后从 SSE 中提取 `response.completed.response`。`/v1/chat/completions` 会将 Chat 请求的 `messages` 转为 Responses `input`，再将上游 Responses 结果转为 Chat Completion：流式请求输出 Chat Completion SSE 块并以 `[DONE]` 结束，非流式请求输出一个 `chat.completion` JSON 对象。当前有五类显式兼容改写：字符串 `input` 包装为官方 Codex 使用的用户消息列表，顶层 `service_tier: "fast"` 映射为 `"priority"`，顶层 `store` 强制为布尔值 `false`，顶层 `temperature` 和 `prompt_cache_options` 会被删除，并删除任意嵌套位置的 `prompt_cache_breakpoint`。所有改写都会记录在 Debug 字段差异中；其他上游参数错误会原样返回，不会通过删除字段、改模型名或注入工具来“兼容”。
 
@@ -178,9 +178,36 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 在相同请求中设置 `"stream": true` 可获得 `text/event-stream` 格式的 Chat Completion 块。`stream_options.include_usage: true` 会在结束块后、`[DONE]` 前增加一个空 `choices` 且带 `usage` 的标准 Usage 块。Chat 输入支持 `system`、`developer`、`user`、`assistant`、`tool` 消息，文本、图片、音频内容块和函数调用；`n` 仅支持 `1`。输出会拼接 Responses 的 `output_text`，并将 `function_call` 映射为 Chat 的 `tool_calls`。
 
+## Codex 模型目录
+
+`GET /v1/models` 使用同一个本地 API Key 认证，代理用配置的 Auth File 请求 `https://chatgpt.com/backend-api/codex/models`。客户端的 `client_version` 等查询参数会原样传递；返回的完整 Codex 模型目录、HTTP 状态码、ETag 和缓存控制头直接转发，不转换为只有模型 ID 的 OpenAI 模型列表，也不在代理内缓存或合并多个账号的目录。账号按 `session-id` 稳定选择，没有该头时使用第一个 Auth File。此接口支持自动刷新令牌和一次 401 重试，不计入 SQLite 推理用量日志。
+
+```bash
+curl 'http://127.0.0.1:8317/v1/models?client_version=0.164.0' \
+  -H 'Authorization: Bearer sk-local-secret'
+```
+
+Codex 使用自定义提供商时，在 `config.toml` 对应提供商下显式配置 `model_catalog_url`，指向代理的目录接口。例如，代理运行在本机：
+
+```toml
+model_provider = "codex_pass"
+
+[features]
+api_key_model_discovery = true
+
+[model_providers.codex_pass]
+name = "Codex Pass"
+base_url = "http://127.0.0.1:8317/v1"
+wire_api = "responses"
+env_key = "CODEX_PASS_KEY"
+model_catalog_url = "http://127.0.0.1:8317/v1/models"
+```
+
+将 `CODEX_PASS_KEY` 设为代理启动时的 `--key`。远程连接时，把两个 URL 中的 `127.0.0.1:8317` 换成客户端可访问的代理地址。Codex 会自动附加自己的 `client_version`，无需在配置中手写版本号。把 `api_key_model_discovery = true` 加到已有的 `[features]` 表中，不要重复声明该表：桌面端可能通过运行时设置关闭此开关，显式配置可覆盖该设置；关闭时，配置 `model_catalog_url` 会使模型选择器为空。移除生效的 `model_catalog_json` 配置，因为本地目录覆盖会阻止远程获取。配置机制见 [Codex 官方模型目录说明](https://developers.openai.com/codex/model-catalogs)。修改后重启 Codex。
+
 ## 上游认证与亲和性
 
-上游固定为 `https://chatgpt.com/backend-api/codex/responses`。代理替换客户端的 `Authorization` 和 `ChatGPT-Account-ID`，并保留客户端显式提供的 `session-id`、`thread-id`、`originator` 等非认证头。没有显式 `session-id` 时，若请求包含字符串 `prompt_cache_key`，代理将该值作为上游 `session-id`。
+推理请求的上游固定为 `https://chatgpt.com/backend-api/codex/responses`，模型目录请求的上游固定为 `https://chatgpt.com/backend-api/codex/models`。代理替换客户端的 `Authorization` 和 `ChatGPT-Account-ID`，并保留客户端显式提供的 `session-id`、`thread-id`、`originator` 等非认证头。没有显式 `session-id` 时，若推理请求包含字符串 `prompt_cache_key`，代理将该值作为上游 `session-id`。
 
 多个 Auth File 不会轮询：相同 `prompt_cache_key` 始终选择同一账号；没有缓存键时，使用 `session-id` 做稳定选择；二者均无时使用第一个账号。OAuth Access Token 是 JWT 时，代理在到期前 5 分钟刷新；同一个 Auth File 的并发刷新会合并为一次请求。若上游在尚未输出前返回 401，会强制刷新后重试一次。
 

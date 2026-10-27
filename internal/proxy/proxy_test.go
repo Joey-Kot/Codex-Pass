@@ -695,7 +695,7 @@ func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debu
 	if len(requestLogs) == 1 {
 		requestLog = requestLogs[0]
 	}
-	handler, err := New(Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", Logger: logger, RequestLog: requestLog})
+	handler, err := New(Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", ModelsUpstreamURL: upstream.URL + "/models", Logger: logger, RequestLog: requestLog})
 	if err != nil {
 		t.Fatal(err)
 	}
