@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	DefaultUpstreamURL       = "https://chatgpt.com/backend-api/codex/responses"
-	DefaultModelsUpstreamURL = "https://chatgpt.com/backend-api/codex/models"
+	DefaultCodexUpstreamURL  = "https://chatgpt.com/backend-api/codex"
+	DefaultUpstreamURL       = DefaultCodexUpstreamURL + "/responses"
+	DefaultModelsUpstreamURL = DefaultCodexUpstreamURL + "/models"
 )
 
 var hopByHopHeaders = []string{

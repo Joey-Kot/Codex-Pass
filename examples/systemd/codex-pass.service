@@ -1,0 +1,30 @@
+[Unit]
+Description=Codex-Pass API proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=codex-pass
+Group=codex-pass
+StateDirectory=codex-pass
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/codex-pass
+EnvironmentFile=/etc/codex-pass/codex-pass.env
+ExecStart=/usr/local/bin/codex-pass \
+    --key ${CODEX_PASS_KEY} \
+    --listen ${CODEX_PASS_LISTEN} \
+    --codex=${CODEX_PASS_CODEX} \
+    --log /var/lib/codex-pass/usage \
+    /var/lib/codex-pass/auth.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

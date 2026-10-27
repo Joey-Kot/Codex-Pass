@@ -18,6 +18,7 @@ type proxyOptions struct {
 	apiKey    string
 	debugPath string
 	listen    string
+	codex     bool
 }
 
 type requestOptions struct {
@@ -49,6 +50,7 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	proxyFlags.StringVar(&options.proxy.apiKey, "key", "", "required client Bearer API key")
 	proxyFlags.StringVar(&options.proxy.debugPath, "debug", "", "optional JSON Lines debug log path")
 	proxyFlags.StringVar(&options.proxy.listen, "listen", "", "listen address (overrides CODEX_PROXY_LISTEN)")
+	proxyFlags.BoolVar(&options.proxy.codex, "codex", false, "enable /codex for Codex with ChatGPT login (no local API key check; raw request bodies)")
 
 	flags := flag.NewFlagSet("codex-pass", flag.ContinueOnError)
 	flags.SetOutput(output)
@@ -60,7 +62,7 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	}
 	flags.Usage = func() {
 		fmt.Fprintln(output, "Usage: codex-pass [common options] <command>")
-		fmt.Fprintln(output, "       codex-pass [common options] --key API_KEY [--listen ADDRESS] [--debug FILE] AUTH_FILE [AUTH_FILE ...]")
+		fmt.Fprintln(output, "       codex-pass [common options] --key API_KEY [--codex] [--listen ADDRESS] [--debug FILE] AUTH_FILE [AUTH_FILE ...]")
 		fmt.Fprintln(output, "\nTransparent Codex Responses API proxy listening on 127.0.0.1:8317 by default.")
 		fmt.Fprintln(output, "\nCommands:")
 		fmt.Fprintln(output, "  sum  Print SQLite request usage summary (requires --log DIR)")

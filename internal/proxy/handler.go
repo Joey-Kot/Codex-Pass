@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,10 +30,12 @@ const (
 
 type Config struct {
 	APIKey            string
+	EnableCodex       bool
 	AuthPool          *auth.Pool
 	HTTPClient        *http.Client
 	UpstreamURL       string
 	ModelsUpstreamURL string
+	CodexUpstreamURL  string
 	Logger            *debuglog.Logger
 	RequestLog        requestlog.Recorder
 	MaxBodyBytes      int64
@@ -42,10 +45,12 @@ type Config struct {
 
 type Server struct {
 	apiKey            string
+	enableCodex       bool
 	authPool          *auth.Pool
 	httpClient        *http.Client
 	upstreamURL       string
 	modelsUpstreamURL string
+	codexUpstreamURL  string
 	logger            *debuglog.Logger
 	requestLog        requestlog.Recorder
 	maxBodyBytes      int64
@@ -70,6 +75,9 @@ func New(config Config) (*Server, error) {
 	if config.ModelsUpstreamURL == "" {
 		config.ModelsUpstreamURL = DefaultModelsUpstreamURL
 	}
+	if config.CodexUpstreamURL == "" {
+		config.CodexUpstreamURL = DefaultCodexUpstreamURL
+	}
 	if config.MaxBodyBytes == 0 {
 		config.MaxBodyBytes = defaultMaxRequestBody
 	}
@@ -81,13 +89,27 @@ func New(config Config) (*Server, error) {
 	}
 	return &Server{
 		apiKey: config.APIKey, authPool: config.AuthPool, httpClient: config.HTTPClient,
+		enableCodex: config.EnableCodex,
 		upstreamURL: config.UpstreamURL, modelsUpstreamURL: config.ModelsUpstreamURL,
-		logger: config.Logger, requestLog: config.RequestLog, maxBodyBytes: config.MaxBodyBytes,
+		codexUpstreamURL: config.CodexUpstreamURL,
+		logger:           config.Logger, requestLog: config.RequestLog, maxBodyBytes: config.MaxBodyBytes,
 		maxAggregate: config.MaxAggregate, userAgent: config.UserAgent,
 	}, nil
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	toolPath, toolRequest := codexToolPath(request.URL.Path)
+	codex := request.URL.Path == "/codex/models" || request.URL.Path == "/codex/responses" || (toolRequest && strings.HasPrefix(request.URL.Path, "/codex/"))
+	if codex && !s.enableCodex {
+		writeError(writer, http.StatusNotFound, "not found")
+		return
+	}
+	if codex && request.URL.Path == "/codex/responses" && request.Method == http.MethodGet && strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+		// Codex treats 426 as an immediate switch to HTTP/SSE. A generic 405
+		// would exhaust its WebSocket retry budget before falling back.
+		writeError(writer, http.StatusUpgradeRequired, "use HTTP POST with SSE")
+		return
+	}
 	switch request.URL.Path {
 	case "/healthz":
 		if request.Method != http.MethodGet {
@@ -98,13 +120,13 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"status":"ok"}\n`))
 		return
-	case "/v1/models":
+	case "/v1/models", "/codex/models":
 		if request.Method != http.MethodGet {
 			writer.Header().Set("Allow", http.MethodGet)
 			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-	case "/v1/responses":
+	case "/v1/responses", "/codex/responses":
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)
 			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
@@ -116,11 +138,19 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+	case "/v1/alpha/search", "/codex/alpha/search", "/v1/images/generations", "/codex/images/generations", "/v1/images/edits", "/codex/images/edits":
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 	default:
 		writeError(writer, http.StatusNotFound, "not found")
 		return
 	}
-	if !s.authorized(request.Header.Get("Authorization")) {
+	// The opt-in Codex entry receives the client's ChatGPT credentials, which
+	// cannot carry our local API key. It is not a token-validation endpoint.
+	if !codex && !s.authorized(request.Header.Get("Authorization")) {
 		writer.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(writer, http.StatusUnauthorized, "invalid API key")
 		return
@@ -129,7 +159,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "debug logger is unavailable")
 		return
 	}
-	if request.URL.Path == "/v1/models" {
+	if request.URL.Path == "/v1/models" || request.URL.Path == "/codex/models" {
 		s.handleModels(writer, request)
 		return
 	}
@@ -141,7 +171,11 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		s.handleChatCompletions(writer, request)
 		return
 	}
-	s.handleResponses(writer, request)
+	if toolRequest {
+		s.handleCodexTool(writer, request, toolPath)
+		return
+	}
+	s.handleResponsesMode(writer, request, codex)
 }
 
 func (s *Server) authorized(header string) bool {
@@ -152,10 +186,14 @@ func (s *Server) authorized(header string) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) == 1
 }
 
-func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) handleResponsesMode(writer http.ResponseWriter, request *http.Request, codex bool) {
 	started := time.Now()
 	requestID := s.newRequestID()
-	metrics, logErr := s.beginRequestLog(request, requestID, "responses", started)
+	endpoint := "responses"
+	if codex {
+		endpoint = "codex/responses"
+	}
+	metrics, logErr := s.beginRequestLog(request, requestID, endpoint, started)
 	if logErr != nil {
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(logErr), "operation": "start request log"})
 		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
@@ -174,13 +212,35 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusRequestEntityTooLarge, readErr.Error())
 		return
 	}
-	if err := metrics.setRequestMetadata(body); err != nil {
+	metadataBody := body
+	if codex {
+		var err error
+		metadataBody, err = s.decodeCodexBody(body, request.Header.Get("Content-Encoding"))
+		if err != nil {
+			metrics.failure("invalid_request_encoding")
+			status := http.StatusBadRequest
+			if errors.Is(err, errUnsupportedEncoding) {
+				status = http.StatusUnsupportedMediaType
+			}
+			writeError(writer, status, err.Error())
+			return
+		}
+	}
+	if err := metrics.setRequestMetadata(metadataBody); err != nil {
 		metrics.failure("request_log_metadata")
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "update request log metadata"})
 		writeError(writer, http.StatusInternalServerError, "request log is unavailable")
 		return
 	}
-	stream, upstreamBody, promptCacheKey, err := prepareBody(body)
+	var stream bool
+	var promptCacheKey string
+	var err error
+	upstreamBody := body
+	if codex {
+		_, stream, promptCacheKey, err = parseResponseRequest(metadataBody)
+	} else {
+		stream, upstreamBody, promptCacheKey, err = prepareBody(body)
+	}
 	if err != nil {
 		metrics.failure("invalid_request")
 		s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": http.StatusBadRequest, "error": debuglog.Error(err)})
@@ -192,8 +252,23 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 		sessionID = promptCacheKey
 	}
 	accountIndex, credential := s.authPool.Select(promptCacheKey, request.Header.Get("session-id"))
+	target := s.upstreamURL
+	if codex && request.URL.RawQuery != "" {
+		parsed, parseErr := url.Parse(target)
+		if parseErr != nil {
+			metrics.failure("invalid_upstream_url")
+			writeError(writer, http.StatusBadGateway, "invalid responses upstream URL")
+			return
+		}
+		parsed.RawQuery = request.URL.RawQuery
+		target = parsed.String()
+	}
 	if s.logger != nil {
-		diff, err := DiffJSON(body, upstreamBody)
+		diffBody := upstreamBody
+		if codex {
+			diffBody = metadataBody
+		}
+		diff, err := DiffJSON(metadataBody, diffBody)
 		if err != nil {
 			metrics.failure("invalid_request")
 			writeError(writer, http.StatusBadRequest, "invalid JSON request: "+err.Error())
@@ -201,14 +276,15 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 		}
 		s.log(requestID, "CLIENT_REQUEST", map[string]any{
 			"method": request.Method, "url": request.URL.String(), "headers": debuglog.Headers(request.Header),
-			"body": string(body), "stream": stream,
+			"body": string(metadataBody), "stream": stream, "mode": endpoint,
+			"body_encoding": request.Header.Get("Content-Encoding"), "body_bytes": len(body),
 		})
 		s.log(requestID, "AUTH_SELECTION", map[string]any{
 			"auth_file_index": accountIndex, "auth_file_format": credential.Format(),
 			"prompt_cache_key": promptCacheKey, "session_id": sessionID,
 		})
 		s.log(requestID, "REQUEST_DIFF", map[string]any{
-			"method": http.MethodPost, "url": s.upstreamURL, "body": string(upstreamBody),
+			"method": http.MethodPost, "url": target, "body": string(diffBody),
 			"json_diff": diff, "prompt_cache_key": promptCacheKey, "session_id": sessionID,
 		})
 	}
@@ -221,14 +297,17 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 	}
 
 	upstreamHeaders := request.Header
-	if !stream || s.logger != nil || s.requestLog != nil {
+	if !stream || codex || s.logger != nil || s.requestLog != nil {
 		// Aggregation, debug tracing, and request accounting all parse the
 		// upstream SSE stream. Request uncompressed bytes for those paths so a
 		// client-negotiated content encoding is never parsed as SSE data.
 		upstreamHeaders = request.Header.Clone()
 		upstreamHeaders.Set("Accept-Encoding", "identity")
 	}
-	upstream, err := s.sendUpstream(request.Context(), upstreamHeaders, upstreamBody, credential, sessionID, requestID)
+	send := func() (*http.Response, error) {
+		return s.sendUpstreamRequest(request.Context(), http.MethodPost, target, upstreamHeaders, upstreamBody, credential, sessionID, requestID)
+	}
+	upstream, err := send()
 	if err != nil {
 		metrics.failureForError("upstream_request", err)
 		s.log(requestID, "ERROR", map[string]any{"error": debuglog.Error(err), "operation": "upstream request"})
@@ -236,7 +315,7 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	if upstream.StatusCode == http.StatusUnauthorized {
-		upstream = s.retryUnauthorized(request.Context(), upstreamHeaders, upstreamBody, credential, sessionID, upstream, requestID)
+		upstream = s.retryUpstreamUnauthorized(request.Context(), credential, upstream, requestID, send)
 		if upstream == nil {
 			metrics.failureForError("upstream_authentication_refresh", request.Context().Err())
 			writeError(writer, http.StatusBadGateway, "upstream authentication refresh failed")
@@ -258,7 +337,11 @@ func (s *Server) handleResponses(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	if stream {
+	if codex && strings.HasPrefix(strings.ToLower(upstream.Header.Get("Content-Type")), "application/json") {
+		s.forwardCodexJSON(writer, upstream, metrics, requestID, started, accountIndex, promptCacheKey, sessionID)
+		return
+	}
+	if stream || codex {
 		firstEvent, final, terminalKind, streamErr := s.forwardStream(writer, upstream.Body, upstream.Header, upstream.StatusCode, requestID)
 		if len(final) != 0 {
 			metrics.terminal(final, terminalKind)
@@ -349,14 +432,22 @@ func (s *Server) sendUpstream(ctx context.Context, clientHeaders http.Header, bo
 }
 
 func (s *Server) sendUpstreamRequest(ctx context.Context, method, target string, clientHeaders http.Header, body []byte, credential *auth.Credential, sessionID, requestID string) (*http.Response, error) {
+	accept := "text/event-stream"
+	if method == http.MethodGet {
+		accept = "application/json"
+	}
+	return s.sendUpstreamAccept(ctx, method, target, clientHeaders, body, credential, sessionID, requestID, accept)
+}
+
+func (s *Server) sendUpstreamAccept(ctx context.Context, method, target string, clientHeaders http.Header, body []byte, credential *auth.Credential, sessionID, requestID, accept string) (*http.Response, error) {
 	snapshot := credential.Snapshot()
 	request, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	request.Header = cloneForwardHeaders(clientHeaders)
+	request.Header.Set("Accept", accept)
 	if method == http.MethodGet {
-		request.Header.Set("Accept", "application/json")
 		request.Header.Del("Content-Type")
 	}
 	request.Header.Set("Authorization", "Bearer "+snapshot.Token)
@@ -371,8 +462,15 @@ func (s *Server) sendUpstreamRequest(ctx context.Context, method, target string,
 		request.Header.Set("session-id", sessionID)
 	}
 	if s.logger != nil {
+		logBody := body
+		if encoding := clientHeaders.Get("Content-Encoding"); encoding != "" {
+			if decoded, decodeErr := s.decodeCodexBody(body, encoding); decodeErr == nil {
+				logBody = decoded
+			}
+		}
 		s.log(requestID, "UPSTREAM_REQUEST", map[string]any{
-			"method": request.Method, "url": request.URL.String(), "headers": debuglog.Headers(request.Header), "body": string(body),
+			"method": request.Method, "url": request.URL.String(), "headers": debuglog.Headers(request.Header), "body": string(logBody),
+			"body_encoding": clientHeaders.Get("Content-Encoding"), "body_bytes": len(body),
 		})
 	}
 	return s.httpClient.Do(request)
@@ -521,13 +619,12 @@ func (s *Server) readBody(body io.ReadCloser) ([]byte, error) {
 	return data, nil
 }
 
-func prepareBody(body []byte) (stream bool, upstream []byte, promptCacheKey string, err error) {
-	var object map[string]json.RawMessage
+func parseResponseRequest(body []byte) (object map[string]json.RawMessage, stream bool, promptCacheKey string, err error) {
 	if err := json.Unmarshal(body, &object); err != nil || object == nil {
 		if err == nil {
 			err = errors.New("request body must be a JSON object")
 		}
-		return false, nil, "", fmt.Errorf("invalid request JSON: %w", err)
+		return nil, false, "", fmt.Errorf("invalid request JSON: %w", err)
 	}
 	if rawCacheKey, found := object["prompt_cache_key"]; found {
 		_ = json.Unmarshal(rawCacheKey, &promptCacheKey)
@@ -535,8 +632,16 @@ func prepareBody(body []byte) (stream bool, upstream []byte, promptCacheKey stri
 	rawStream, found := object["stream"]
 	if found {
 		if err := json.Unmarshal(rawStream, &stream); err != nil {
-			return false, nil, "", errors.New("top-level stream must be a JSON boolean")
+			return nil, false, "", errors.New("top-level stream must be a JSON boolean")
 		}
+	}
+	return object, stream, promptCacheKey, nil
+}
+
+func prepareBody(body []byte) (stream bool, upstream []byte, promptCacheKey string, err error) {
+	object, stream, promptCacheKey, err := parseResponseRequest(body)
+	if err != nil {
+		return false, nil, "", err
 	}
 	inputWrapped := false
 	if rawInput, found := object["input"]; found {

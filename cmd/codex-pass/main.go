@@ -83,6 +83,7 @@ func runProxy(common commonOptions, options proxyOptions, authFiles []string) in
 	}
 	handler, err := proxy.New(proxy.Config{
 		APIKey: options.apiKey, AuthPool: pool, HTTPClient: httpClient, Logger: logger, RequestLog: usageLog,
+		EnableCodex: options.codex,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -101,6 +102,9 @@ func runProxy(common commonOptions, options proxyOptions, authFiles []string) in
 		MaxHeaderBytes:    1 << 20,
 	}
 	log.Printf("codex-pass listening on http://%s with %d auth file(s)", listenAddress, len(credentials))
+	if options.codex {
+		log.Printf("Codex entry enabled at /codex (no local API key check); /v1 still requires --key")
+	}
 	if logger != nil {
 		log.Printf("detailed debug logging enabled at %s", options.debugPath)
 	}

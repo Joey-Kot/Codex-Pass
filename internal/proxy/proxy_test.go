@@ -668,6 +668,10 @@ func TestDiffJSONReportsOnlyTopLevelStreamChange(t *testing.T) {
 }
 
 func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debugPath string, requestLogs ...requestlog.Recorder) (*httptest.Server, func()) {
+	return newTestProxyConfigured(t, upstream, refreshEndpoint, debugPath, nil, requestLogs...)
+}
+
+func newTestProxyConfigured(t *testing.T, upstream *httptest.Server, refreshEndpoint, debugPath string, configure func(*Config), requestLogs ...requestlog.Recorder) (*httptest.Server, func()) {
 	t.Helper()
 	authPath := filepath.Join(t.TempDir(), "auth.json")
 	if err := os.WriteFile(authPath, []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"test-access","refresh_token":"test-refresh","account_id":"test-account"}}`), 0o600); err != nil {
@@ -695,7 +699,11 @@ func newTestProxy(t *testing.T, upstream *httptest.Server, refreshEndpoint, debu
 	if len(requestLogs) == 1 {
 		requestLog = requestLogs[0]
 	}
-	handler, err := New(Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", ModelsUpstreamURL: upstream.URL + "/models", Logger: logger, RequestLog: requestLog})
+	config := Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", ModelsUpstreamURL: upstream.URL + "/models", CodexUpstreamURL: upstream.URL, Logger: logger, RequestLog: requestLog}
+	if configure != nil {
+		configure(&config)
+	}
+	handler, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}

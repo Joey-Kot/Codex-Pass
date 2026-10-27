@@ -81,6 +81,14 @@ func TestProxyCommandLine(t *testing.T) {
 			},
 		},
 		{
+			name:      "Codex entry alongside keyed API",
+			arguments: []string{"--codex", "--key", "test-key", "auth.json"},
+			want: commandLine{
+				proxy:     proxyOptions{apiKey: "test-key", codex: true},
+				authFiles: []string{"auth.json"},
+			},
+		},
+		{
 			name:      "command name as key and log directory",
 			arguments: []string{"--key", "sum", "--log", "sum", "auth.json"},
 			want: commandLine{
@@ -190,6 +198,8 @@ func TestCommandLineRejectsInvalidArguments(t *testing.T) {
 		{name: "missing flag value after sum", arguments: []string{"sum", "--log"}, wantError: "flag needs an argument: -log"},
 		{name: "invalid boolean", arguments: []string{"sum", "--human=maybe"}, wantError: "invalid boolean value"},
 		{name: "missing proxy key", arguments: []string{"auth.json"}, wantError: "--key is required"},
+		{name: "Codex entry still requires proxy key", arguments: []string{"--codex", "auth.json"}, wantError: "--key is required"},
+		{name: "Codex entry is proxy only", arguments: []string{"--codex", "sum", "--log", "usage"}, wantError: "--codex is only available in proxy mode"},
 		{name: "missing proxy auth file", arguments: []string{"--key", "test-key"}, wantError: "at least one Codex auth file is required"},
 		{name: "req missing log", arguments: []string{"req"}, wantError: "req requires --log DIR"},
 		{name: "req extra argument", arguments: []string{"req", "--log", "usage", "auth.json"}, wantError: "req does not accept positional arguments"},
