@@ -1,4 +1,3 @@
-
 {
   "currency": "USD",
   "unit": "per_token",
@@ -27,6 +26,18 @@
         "input": 0.000004,
         "cached_input": 0.0000002,
         "output": 0.000015
+      }
+    },
+    "gpt-6.1-terra": {
+      "short_context": {
+        "input": 0.000001,
+        "cached_input": 0.00000005,
+        "output": 0.000005
+      },
+      "long_context": {
+        "input": 0.000002,
+        "cached_input": 0.0000001,
+        "output": 0.0000075
       }
     },
     "gpt-6-sol": {
