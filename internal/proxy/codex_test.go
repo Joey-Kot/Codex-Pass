@@ -255,6 +255,30 @@ func TestCodexRetryPreservesCompressedRequest(t *testing.T) {
 	}
 }
 
+func TestCodexForwardsCompressedBodyLargerThan32MiB(t *testing.T) {
+	body := []byte(`{"model":"native-model","stream":true,"padding":"` + strings.Repeat("x", 33<<20) + `"}`)
+	wire := encodeCodexTestBody(t, body, "zstd")
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		got, err := io.ReadAll(r.Body)
+		if err != nil || !bytes.Equal(got, wire) || r.Header.Get("Content-Encoding") != "zstd" {
+			t.Error("compressed request was not forwarded unchanged")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, codexSSE)
+	}))
+	defer upstream.Close()
+	server, cleanup := newTestProxyConfigured(t, upstream, upstream.URL+"/refresh", "", enableCodex)
+	defer cleanup()
+	response := codexRequest(t, server, wire, "zstd")
+	_, err := io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("status=%d upstream calls=%d error=%v", response.StatusCode, calls.Load(), err)
+	}
+}
+
 func TestCodexRejectsInvalidOrOversizedInspectionCopies(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))

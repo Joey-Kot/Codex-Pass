@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	defaultMaxRequestBody = 32 << 20
+	defaultMaxRequestBody = 128 << 20
 	defaultMaxAggregate   = 64 << 20
 	maxErrorBody          = 4 << 20
 )

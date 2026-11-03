@@ -89,7 +89,7 @@ openai_base_url = "http://127.0.0.1:8317/codex"
 
 Codex automatically fetches `/codex/models` and sends inference requests to `/codex/responses`. No custom provider definition, `env_key`, or `model_catalog_url` is needed for this route. Automatic discovery here requires ChatGPT login; API Key clients should use `/v1`.
 
-The dedicated route preserves all request fields, including unknown fields, and supports Codex's zstd compression. An inspection copy supplies log metadata and usage accounting; the original wire bytes are forwarded and reused on retries. WebSocket connection probes switch the client to HTTP/SSE immediately.
+The dedicated route preserves all request fields, including unknown fields, and supports Codex's zstd compression. An inspection copy supplies log metadata and usage accounting; the original wire bytes are forwarded and reused on retries. The request body limit is 128 MiB, applied separately to the received and decompressed bodies. WebSocket connection probes switch the client to HTTP/SSE immediately.
 
 For either Codex configuration, remove any effective `model_catalog_json` override so remote discovery can run, then restart Codex. For remote clients, replace `127.0.0.1:8317` with an address reachable from the client. See the official [base URL configuration](https://learn.chatgpt.com/docs/config-file/config-advanced) and [model catalog documentation](https://learn.chatgpt.com/docs/model-catalogs).
 

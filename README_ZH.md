@@ -89,7 +89,7 @@ openai_base_url = "http://127.0.0.1:8317/codex"
 
 Codex 会自动访问 `/codex/models` 获取模型目录，并将推理请求发送到 `/codex/responses`。这条路径无需定义自定义 Provider，也无需配置 `env_key` 或 `model_catalog_url`。此处的自动模型发现依赖 ChatGPT 登录；使用 API Key 的客户端应选择 `/v1`。
 
-专用路径保留全部请求字段，包括未知字段，并支持 Codex 的 zstd 压缩。代理使用检查副本提取日志元数据和用量信息，转发及重试均使用原始请求字节。收到 WebSocket 连接探测时，代理会让客户端立即切换到 HTTP/SSE。
+专用路径保留全部请求字段，包括未知字段，并支持 Codex 的 zstd 压缩。代理使用检查副本提取日志元数据和用量信息，转发及重试均使用原始请求字节。请求体上限为 128 MiB，接收到的请求体和解压后的请求体分别受此限制。收到 WebSocket 连接探测时，代理会让客户端立即切换到 HTTP/SSE。
 
 上述两种 Codex 配置都需要移除生效的 `model_catalog_json` 覆盖，以便获取远程模型目录，然后重启 Codex。远程客户端应将 `127.0.0.1:8317` 替换为客户端可以访问的地址。配置机制可参考官方的 [Base URL 配置说明](https://learn.chatgpt.com/docs/config-file/config-advanced)和[模型目录说明](https://learn.chatgpt.com/docs/model-catalogs)。
 
