@@ -4,7 +4,21 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+
+	"codex-pass/internal/codexapi"
+)
+
+const (
+	sqliteFlag  = "codexpass-sqlite"
+	debugFlag   = "codexpass-debug"
+	sqliteEnv   = "CODEXPASS_SQLITE"
+	debugEnv    = "CODEXPASS_DEBUG"
+	authFileEnv = "CODEXPASS_AUTH_FILE"
 )
 
 type commonOptions struct {
@@ -25,6 +39,12 @@ type requestOptions struct {
 	ascending  bool
 	descending bool
 	num        int
+	models     []string
+}
+
+type accountOptions struct {
+	resetNumber   int
+	clientVersion string
 }
 
 type commandLine struct {
@@ -32,14 +52,15 @@ type commandLine struct {
 	common    commonOptions
 	proxy     proxyOptions
 	request   requestOptions
+	account   accountOptions
 	authFiles []string
 }
 
 func registerCommonFlags(flags *flag.FlagSet, options *commonOptions) {
-	flags.StringVar(&options.logDirectory, "log", options.logDirectory, "directory for SQLite request usage logging and queries")
-	flags.StringVar(&options.timeRange, "time", options.timeRange, "time range: START,END or 2m/1h/2d/1w/3M/1y; m: minutes, M: calendar months")
+	flags.StringVar(&options.logDirectory, sqliteFlag, options.logDirectory, "SQLite usage log `DIR` (defaults to "+sqliteEnv+")")
+	flags.StringVar(&options.timeRange, "time", options.timeRange, "time `RANGE` as START,END or 2m/1h/2d/1w/3M/1y (m for minutes, M for months)")
 	flags.BoolVar(&options.humanReadable, "human", options.humanReadable, "format numeric output with compact K/M/B units")
-	flags.StringVar(&options.priceFile, "price", options.priceFile, "JSON price table for request cost estimates")
+	flags.StringVar(&options.priceFile, "price", options.priceFile, "JSON `FILE` with prices for request cost estimates")
 }
 
 func parseCommandLine(arguments []string, output io.Writer) (commandLine, error) {
@@ -47,39 +68,49 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	commonFlags := flag.NewFlagSet("common", flag.ContinueOnError)
 	registerCommonFlags(commonFlags, &options.common)
 	proxyFlags := flag.NewFlagSet("proxy", flag.ContinueOnError)
-	proxyFlags.StringVar(&options.proxy.apiKey, "key", "", "required client Bearer API key")
-	proxyFlags.StringVar(&options.proxy.debugPath, "debug", "", "optional JSON Lines debug log path")
-	proxyFlags.StringVar(&options.proxy.listen, "listen", "", "listen address (overrides CODEX_PROXY_LISTEN)")
+	proxyFlags.StringVar(&options.proxy.apiKey, "key", "", "required client Bearer `KEY`")
+	proxyFlags.StringVar(&options.proxy.debugPath, debugFlag, "", "JSON Lines debug log `FILE` (defaults to "+debugEnv+")")
+	proxyFlags.StringVar(&options.proxy.listen, "listen", "", "listen `ADDRESS` (overrides CODEX_PROXY_LISTEN)")
 	proxyFlags.BoolVar(&options.proxy.codex, "codex", false, "enable /codex for Codex with ChatGPT login (no local API key check; raw request bodies)")
 
 	flags := flag.NewFlagSet("codex-pass", flag.ContinueOnError)
 	flags.SetOutput(output)
 	for _, group := range []*flag.FlagSet{commonFlags, proxyFlags} {
-		group.SetOutput(output)
 		group.VisitAll(func(option *flag.Flag) {
 			flags.Var(option.Value, option.Name, option.Usage)
 		})
 	}
 	flags.Usage = func() {
-		fmt.Fprintln(output, "Usage: codex-pass [common options] <command>")
-		fmt.Fprintln(output, "       codex-pass [common options] --key API_KEY [--codex] [--listen ADDRESS] [--debug FILE] AUTH_FILE [AUTH_FILE ...]")
+		fmt.Fprintln(output, "Usage: codex-pass [common options] <command> [command arguments]")
+		fmt.Fprintln(output, "       codex-pass [common options] --key API_KEY [--codex] [--listen ADDRESS] [--codexpass-debug FILE] [AUTH_FILE ...]")
 		fmt.Fprintln(output, "\nTransparent Codex Responses API proxy listening on 127.0.0.1:8317 by default.")
 		fmt.Fprintln(output, "\nCommands:")
-		fmt.Fprintln(output, "  sum  Print SQLite request usage summary (requires --log DIR)")
-		fmt.Fprintln(output, "  req  Print individual request logs (requires --log DIR)")
-		fmt.Fprintln(output, "\nCommon options (before or after a command):")
-		commonFlags.PrintDefaults()
+		fmt.Fprintln(output, "  sum  Print SQLite request usage summary")
+		fmt.Fprintln(output, "  req  Print individual request logs")
+		fmt.Fprintln(output, "  quota [AUTH_FILE ...]       Show weekly Codex quota usage")
+		fmt.Fprintln(output, "  reset [N] [AUTH_FILE ...]   List usage limit resets or redeem reset N")
+		fmt.Fprintln(output, "  models [--client-version VERSION] [AUTH_FILE ...]   List account model catalogs")
+		fmt.Fprintln(output)
+		printAuthFileHelp(output)
+		fmt.Fprintln(output, "\nCommon options (before or after sum or req):")
+		printLongFlags(output, commonFlags)
 		fmt.Fprintln(output, "\nProxy options:")
-		proxyFlags.PrintDefaults()
+		printLongFlags(output, proxyFlags)
 	}
 
-	rootArguments, command, commandArguments := splitCommand(arguments, flags)
-	if err := flags.Parse(rootArguments); err != nil {
+	operands, terminated, err := parseLongFlags(flags, arguments)
+	if err != nil {
 		return options, err
 	}
-	options.command = command
+	if !terminated && len(operands) > 0 {
+		switch operands[0] {
+		case "sum", "req", "quota", "reset", "models":
+			options.command, operands = operands[0], operands[1:]
+		}
+	}
+	command := options.command
 	if command == "" {
-		options.authFiles = flags.Args()
+		options.authFiles = resolveAuthFiles(operands)
 		if strings.TrimSpace(options.proxy.apiKey) == "" {
 			err := fmt.Errorf("--key is required")
 			fmt.Fprintln(output, "error:", err)
@@ -87,10 +118,16 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 			return options, err
 		}
 		if len(options.authFiles) == 0 {
-			err := fmt.Errorf("at least one Codex auth file is required")
+			err := fmt.Errorf("at least one Codex auth file is required (pass paths or set %s)", authFileEnv)
 			fmt.Fprintln(output, "error:", err)
 			flags.Usage()
 			return options, err
+		}
+		if !hasFlag(flags, sqliteFlag) {
+			options.common.logDirectory = os.Getenv(sqliteEnv)
+		}
+		if !hasFlag(flags, debugFlag) {
+			options.proxy.debugPath = os.Getenv(debugEnv)
 		}
 		return options, nil
 	}
@@ -107,39 +144,67 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 		return options, err
 	}
 
+	switch command {
+	case "quota", "reset", "models":
+		var reportFlag string
+		flags.Visit(func(option *flag.Flag) {
+			if reportFlag == "" {
+				reportFlag = option.Name
+			}
+		})
+		if reportFlag != "" {
+			err := fmt.Errorf("--%s is unavailable with %s", reportFlag, command)
+			fmt.Fprintln(output, "error:", err)
+			return options, err
+		}
+		err := parseAccountOptions(&options, operands, output)
+		return options, err
+	}
+
 	commandFlags := flag.NewFlagSet("codex-pass "+command, flag.ContinueOnError)
 	commandFlags.SetOutput(output)
 	registerCommonFlags(commandFlags, &options.common)
 	requestFlags := flag.NewFlagSet("req", flag.ContinueOnError)
-	requestFlags.SetOutput(output)
 	if command == "req" {
 		requestFlags.BoolVar(&options.request.ascending, "asc", false, "sort requests by start time, oldest first")
 		requestFlags.BoolVar(&options.request.descending, "desc", false, "sort requests by start time, newest first (default order)")
-		requestFlags.IntVar(&options.request.num, "num", 0, "maximum number of request records (positive integer; default: no limit)")
+		requestFlags.IntVar(&options.request.num, "num", 0, "maximum `N` request records (positive integer, unlimited by default)")
+		requestFlags.Func("models", "filter by exact `MODEL[,MODEL...]` names", func(value string) error {
+			models := strings.Split(value, ",")
+			for index, model := range models {
+				models[index] = strings.TrimSpace(model)
+				if models[index] == "" {
+					return fmt.Errorf("model names must not be empty")
+				}
+			}
+			options.request.models = models
+			return nil
+		})
 		requestFlags.VisitAll(func(option *flag.Flag) {
 			commandFlags.Var(option.Value, option.Name, option.Usage)
 		})
 	}
 	commandFlags.Usage = func() {
-		fmt.Fprintf(output, "Usage: codex-pass [common options] %s --log DIR [--time RANGE] [--human] [--price FILE]", command)
+		fmt.Fprintf(output, "Usage: codex-pass [common options] %s [--codexpass-sqlite DIR] [--time RANGE] [--human] [--price FILE]", command)
 		if command == "req" {
-			fmt.Fprintln(output, " [--asc | --desc] [--num N]")
+			fmt.Fprintln(output, " [--asc | --desc] [--num N] [--models MODEL[,MODEL...]]")
 			fmt.Fprintln(output, "\nPrint request counts and individual request logs, newest first by default.")
 		} else {
 			fmt.Fprintln(output)
 			fmt.Fprintln(output, "\nPrint SQLite request usage summary.")
 		}
 		fmt.Fprintln(output, "\nCommon options (before or after the command):")
-		commonFlags.PrintDefaults()
+		printLongFlags(output, commonFlags)
 		if command == "req" {
 			fmt.Fprintln(output, "\nRequest options (after req):")
-			requestFlags.PrintDefaults()
+			printLongFlags(output, requestFlags)
 		}
 	}
-	if err := commandFlags.Parse(commandArguments); err != nil {
+	operands, _, err = parseLongFlags(commandFlags, operands)
+	if err != nil {
 		return options, err
 	}
-	if commandFlags.NArg() != 0 {
+	if len(operands) != 0 {
 		err := fmt.Errorf("%s does not accept positional arguments", command)
 		fmt.Fprintln(output, "error:", err)
 		return options, err
@@ -149,19 +214,16 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 		fmt.Fprintln(output, "error:", err)
 		return options, err
 	}
-	var numSpecified bool
-	commandFlags.Visit(func(option *flag.Flag) {
-		if option.Name == "num" {
-			numSpecified = true
-		}
-	})
-	if numSpecified && options.request.num <= 0 {
+	if hasFlag(commandFlags, "num") && options.request.num <= 0 {
 		err := fmt.Errorf("--num must be a positive integer")
 		fmt.Fprintln(output, "error:", err)
 		return options, err
 	}
+	if !hasFlag(flags, sqliteFlag) && !hasFlag(commandFlags, sqliteFlag) {
+		options.common.logDirectory = os.Getenv(sqliteEnv)
+	}
 	if strings.TrimSpace(options.common.logDirectory) == "" {
-		err := fmt.Errorf("%s requires --log DIR", command)
+		err := fmt.Errorf("%s requires --%s DIR or %s", command, sqliteFlag, sqliteEnv)
 		fmt.Fprintln(output, "error:", err)
 		commandFlags.Usage()
 		return options, err
@@ -169,30 +231,134 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	return options, nil
 }
 
-// Only the first positional argument can select a command. Flag values and
-// arguments after -- keep their usual meaning, even when named after a command.
-func splitCommand(arguments []string, flags *flag.FlagSet) ([]string, string, []string) {
+func parseAccountOptions(options *commandLine, arguments []string, output io.Writer) error {
+	command := options.command
+	flags := flag.NewFlagSet("codex-pass "+command, flag.ContinueOnError)
+	flags.SetOutput(output)
+	usage := command
+	switch command {
+	case "reset":
+		usage += " [N]"
+	case "models":
+		usage += " [--client-version VERSION]"
+		flags.StringVar(&options.account.clientVersion, "client-version", codexapi.ModelsClientVersion, "Codex model catalog client `VERSION`")
+	}
+	flags.Usage = func() {
+		fmt.Fprintln(output, "Usage: codex-pass "+usage+" [AUTH_FILE ...]")
+		if command == "reset" {
+			fmt.Fprintln(output, "List usage limit resets, or redeem the available reset numbered N (starting at 1) after confirmation.")
+		}
+		printAuthFileHelp(output)
+		printLongFlags(output, flags)
+	}
+	paths, _, err := parseLongFlags(flags, arguments)
+	if err != nil {
+		return err
+	}
+	if command == "reset" && len(paths) > 0 && isResetNumber(paths[0]) {
+		number, err := strconv.Atoi(paths[0])
+		if err != nil || number < 1 {
+			err := fmt.Errorf("reset number must be a positive integer")
+			fmt.Fprintln(output, "error:", err)
+			return err
+		}
+		options.account.resetNumber = number
+		paths = paths[1:]
+	}
+	options.authFiles = resolveAuthFiles(paths)
+	if len(options.authFiles) == 0 {
+		err := fmt.Errorf("%s requires at least one Codex auth file (pass paths or set %s)", command, authFileEnv)
+		fmt.Fprintln(output, "error:", err)
+		flags.Usage()
+		return err
+	}
+	if command == "models" && options.account.clientVersion == "" {
+		options.account.clientVersion = codexapi.ModelsClientVersion
+	}
+	return nil
+}
+
+func isResetNumber(argument string) bool {
+	if strings.HasPrefix(argument, "+") || strings.HasPrefix(argument, "-") {
+		argument = argument[1:]
+	}
+	return argument != "" && strings.Trim(argument, "0123456789") == ""
+}
+
+func resolveAuthFiles(paths []string) []string {
+	if len(paths) > 0 {
+		return paths
+	}
+	return slices.DeleteFunc(filepath.SplitList(os.Getenv(authFileEnv)), func(path string) bool {
+		return strings.TrimSpace(path) == ""
+	})
+}
+
+func printAuthFileHelp(output io.Writer) {
+	fmt.Fprintf(output, "%s supplies default auth paths separated by %q. Positional paths override it.\n", authFileEnv, string(os.PathListSeparator))
+}
+
+func hasFlag(flags *flag.FlagSet, name string) bool {
+	set := false
+	flags.Visit(func(option *flag.Flag) { set = set || option.Name == name })
+	return set
+}
+
+func printLongFlags(output io.Writer, flags *flag.FlagSet) {
+	flags.VisitAll(func(option *flag.Flag) {
+		parameter, description := flag.UnquoteUsage(option)
+		name := "--" + option.Name
+		if parameter != "" {
+			name += " " + parameter
+		}
+		if option.DefValue != "" && option.DefValue != "false" && option.DefValue != "0" {
+			description += fmt.Sprintf(" (default %q)", option.DefValue)
+		}
+		fmt.Fprintf(output, "  %-26s %s\n", name, description)
+	})
+}
+
+// FlagSet keeps the typed values and records which options were set. Parse only
+// the leading GNU long options so the remaining arguments can select a command.
+func parseLongFlags(flags *flag.FlagSet, arguments []string) (operands []string, terminated bool, err error) {
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
-		if argument == "--" {
-			break
+		switch {
+		case argument == "--":
+			return arguments[index+1:], true, nil
+		case argument == "-" || !strings.HasPrefix(argument, "-"):
+			return arguments[index:], false, nil
+		case argument == "--help":
+			flags.Usage()
+			return nil, false, flag.ErrHelp
+		case !strings.HasPrefix(argument, "--"):
+			return nil, false, printOptionError(flags, fmt.Errorf("invalid option %q (use -- for long options)", argument))
 		}
-		if !strings.HasPrefix(argument, "-") || argument == "-" {
-			switch argument {
-			case "sum", "req":
-				return arguments[:index], argument, arguments[index+1:]
-			}
-			break
-		}
-		name, _, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(argument, "-"), "-"), "=")
+		name, value, hasValue := strings.Cut(argument[2:], "=")
 		option := flags.Lookup(name)
 		if option == nil {
-			break // Let flag.Parse report unknown flags or handle --help.
+			return nil, false, printOptionError(flags, fmt.Errorf("unknown option --%s", name))
 		}
-		boolean, isBoolean := option.Value.(interface{ IsBoolFlag() bool })
-		if !hasValue && (!isBoolean || !boolean.IsBoolFlag()) {
-			index++
+		if !hasValue {
+			if boolean, ok := option.Value.(interface{ IsBoolFlag() bool }); ok && boolean.IsBoolFlag() {
+				value = "true"
+			} else {
+				index++
+				if index == len(arguments) {
+					return nil, false, printOptionError(flags, fmt.Errorf("option --%s requires a value", name))
+				}
+				value = arguments[index]
+			}
+		}
+		if err := flags.Set(name, value); err != nil {
+			return nil, false, printOptionError(flags, fmt.Errorf("invalid value %q for --%s: %w", value, name, err))
 		}
 	}
-	return arguments, "", nil
+	return nil, false, nil
+}
+
+func printOptionError(flags *flag.FlagSet, err error) error {
+	fmt.Fprintln(flags.Output(), "error:", err)
+	flags.Usage()
+	return err
 }

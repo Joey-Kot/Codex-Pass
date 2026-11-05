@@ -58,6 +58,7 @@ func TestPriceReportsUsePerRequestCostsAndOneTotal(t *testing.T) {
 		logDirectory: directory, timeRange: "2026-10-24-20-00,2026-10-24-20-00",
 		priceFile: filepath.Join("..", "..", "prices.example.json"),
 	}
+	t.Setenv("CODEXPASS_SQLITE", directory)
 	wantModelPrices := map[string]string{
 		"All models": "USD 10.995", "gpt-6-astra": "USD 10.995", "gpt-6-luna": "USD 0.00", "Sum": "USD 10.995",
 	}
@@ -109,22 +110,34 @@ func TestPriceReportsUsePerRequestCostsAndOneTotal(t *testing.T) {
 		wantCountTail []string
 	}{
 		{
-			name: "number without time", arguments: []string{"req", "--log", directory, "--num", "2", "--price", options.priceFile, "--human"},
+			name: "number without time", arguments: []string{"req", "--codexpass-sqlite", directory, "--num", "2", "--price", options.priceFile, "--human"},
 			wantPrices: []string{"-", "USD 0.00"}, wantTotal: "USD 0.00 (partial)",
 			wantModels:    map[string]string{"All models": "USD 0.00 (partial)", "excluded-model": "- (partial)", "gpt-6-luna": "USD 0.00", "Sum": "USD 0.00 (partial)"},
 			wantCountTail: []string{"2", "1", "0", "0", "1"},
 		},
 		{
-			name: "number with time", arguments: []string{"--time", options.timeRange, "req", "--log", directory, "--num=2", "--price", options.priceFile},
+			name: "number with time", arguments: []string{"--time", options.timeRange, "req", "--codexpass-sqlite", directory, "--num=2", "--price", options.priceFile},
 			wantPrices: []string{"USD 0.00", "USD 0.00"}, wantTotal: "USD 0.00",
 			wantModels:    map[string]string{"All models": "USD 0.00", "gpt-6-astra": "USD 0.00", "gpt-6-luna": "USD 0.00", "Sum": "USD 0.00"},
 			wantCountTail: []string{"2", "2", "0", "0", "0"},
 		},
 		{
-			name: "number with ascending order", arguments: []string{"req", "--log", directory, "--time", options.timeRange, "--num", "2", "--asc", "--price", options.priceFile},
+			name: "number with ascending order", arguments: []string{"req", "--codexpass-sqlite", directory, "--time", options.timeRange, "--num", "2", "--asc", "--price", options.priceFile},
 			wantPrices: []string{"USD 2.05", "USD 1.20"}, wantTotal: "USD 3.25",
 			wantModels:    map[string]string{"All models": "USD 3.25", "gpt-6-astra": "USD 3.25", "Sum": "USD 3.25"},
 			wantCountTail: []string{"2", "1", "1", "0", "0"},
+		},
+		{
+			name: "single model before number limit", arguments: []string{"req", "--codexpass-sqlite", directory, "--models", "gpt-6-astra", "--num", "2", "--price", options.priceFile},
+			wantPrices: []string{"USD 0.00", "USD 2.59"}, wantTotal: "USD 2.59",
+			wantModels:    map[string]string{"All models": "USD 2.59", "gpt-6-astra": "USD 2.59", "Sum": "USD 2.59"},
+			wantCountTail: []string{"2", "2", "0", "0", "0"},
+		},
+		{
+			name: "multiple models with SQLite environment", arguments: []string{"req", "--models=gpt-6-astra,gpt-6-luna", "--num", "2", "--price", options.priceFile},
+			wantPrices: []string{"USD 0.00", "USD 0.00"}, wantTotal: "USD 0.00",
+			wantModels:    map[string]string{"All models": "USD 0.00", "gpt-6-astra": "USD 0.00", "gpt-6-luna": "USD 0.00", "Sum": "USD 0.00"},
+			wantCountTail: []string{"2", "2", "0", "0", "0"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

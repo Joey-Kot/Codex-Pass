@@ -47,6 +47,6 @@ func (p *Pool) EnsureFresh(ctx context.Context, credential *Credential) error {
 	return credential.EnsureFresh(ctx, p.refresh)
 }
 
-func (p *Pool) Refresh(ctx context.Context, credential *Credential) error {
-	return credential.Refresh(ctx, p.refresh)
+func (p *Pool) Refresh(ctx context.Context, credential *Credential, rejectedToken string) error {
+	return credential.Refresh(ctx, p.refresh, rejectedToken)
 }

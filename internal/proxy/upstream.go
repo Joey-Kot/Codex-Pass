@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+
+	"codex-pass/internal/codexapi"
 )
 
 const (
-	DefaultCodexUpstreamURL  = "https://chatgpt.com/backend-api/codex"
+	DefaultCodexUpstreamURL  = codexapi.BackendURL + "/codex"
 	DefaultUpstreamURL       = DefaultCodexUpstreamURL + "/responses"
-	DefaultModelsUpstreamURL = DefaultCodexUpstreamURL + "/models"
+	DefaultModelsUpstreamURL = codexapi.BackendURL + codexapi.CodexModelsPath
 )
 
 var hopByHopHeaders = []string{

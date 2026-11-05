@@ -14,9 +14,7 @@ EnvironmentFile=/etc/codex-pass/codex-pass.env
 ExecStart=/usr/local/bin/codex-pass \
     --key ${CODEX_PASS_KEY} \
     --listen ${CODEX_PASS_LISTEN} \
-    --codex=${CODEX_PASS_CODEX} \
-    --log /var/lib/codex-pass/usage \
-    /var/lib/codex-pass/auth.json
+    --codex=${CODEX_PASS_CODEX}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

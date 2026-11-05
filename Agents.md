@@ -21,16 +21,16 @@ go build -o codex-pass ./cmd/codex-pass
 ./codex-pass \
   --key sk-local-secret \
   --listen 127.0.0.1:8317 \
-  --debug ./proxy.jsonl \
-  --log ./usage \
+  --codexpass-debug ./proxy.jsonl \
+  --codexpass-sqlite ./usage \
   /path/to/copied-auth.json
 ```
 
-常规代理模式下，`--key` 必填，`--debug`、`--log` 和 `--listen` 可选，后面必须给出至少一个 Auth File。`--listen` 优先于 `CODEX_PROXY_LISTEN`；两者都未设置时默认监听 `127.0.0.1:8317`。如果改成非回环地址，程序会发出 TLS、访问控制和日志保护提示。
+常规代理模式下，`--key` 必填，`--codexpass-debug`、`--codexpass-sqlite` 和 `--listen` 可选。认证文件可作为位置参数传入，也可设置 `CODEXPASS_AUTH_FILE`。SQLite 目录和调试日志路径分别默认读取 `CODEXPASS_SQLITE` 和 `CODEXPASS_DEBUG`。命令行指定的路径优先。`--listen` 优先于 `CODEX_PROXY_LISTEN`，两者都未设置时默认监听 `127.0.0.1:8317`。如果改成非回环地址，程序会发出 TLS、访问控制和日志保护提示。
 
 `--codex` 默认关闭。启用后 `/v1` 仍然校验 `--key`，另行开放 `/codex` 供 Codex 的内置 OpenAI Provider 使用；这个入口不校验本地 Key，也不验证客户端携带的 ChatGPT 令牌，访问控制由监听地址或前置代理承担。两种方式的区别和客户端配置见下文“Codex 内置 OpenAI Provider”。
 
-建议先复制官方 Codex 或 CPA 的认证文件到专用目录，再传给代理。刷新令牌通常会轮换；代理会原子写回指定文件并设为 `0600`，因此不建议多个程序同时刷新同一个源文件。
+建议把官方 Codex 或 CPA 的认证文件复制到专用目录，供 Codex-Pass 的代理和账户命令使用。同一文件的刷新由伴随锁协调。刷新后会原子写回认证文件实际所在的路径，权限为 `0600`。
 
 支持两类明确格式：
 
@@ -41,7 +41,7 @@ go build -o codex-pass ./cmd/codex-pass
 
 ## 请求用量 SQLite 日志与汇总
 
-传入 `--log DIR` 后，代理会在目录中创建并写入 `DIR/codex-pass.sqlite`。未传该参数时不会创建或写入 SQLite 数据库。
+通过 `--codexpass-sqlite DIR` 或 `CODEXPASS_SQLITE` 指定目录后，代理会创建并写入 `DIR/codex-pass.sqlite`。
 
 数据库记录每一条已通过本地 API Key 校验的 `/v1/responses` 和 `/v1/chat/completions` 请求，以及启用 `--codex` 后的 `/codex/responses` 请求。不记录模型目录、`/healthz`、未知路径、WebSocket 连接探测或未通过 `/v1` 认证的流量。每条记录包含：请求开始、结束时间，模型名，输入 Token、缓存写入 Token、缓存读取 Token、输出 Token、思考 Token，以及请求中的 `reasoning.effort`（Chat 请求也兼容 `reasoning_effort`）。请求正文、响应正文、认证信息和缓存键不会写入 SQLite。
 
@@ -57,18 +57,18 @@ go build -o codex-pass ./cmd/codex-pass
 使用 `sum` 子命令查询数据库，不会启动代理，也不要求 `--key` 或 Auth File：
 
 ```bash
-./codex-pass sum --log ./usage
-./codex-pass sum --log ./usage --time 2026-06-09,2026-10-10
-./codex-pass sum --log ./usage --time 2026-06-09-10-00,2026-10-10-08-45
-./codex-pass sum --log ./usage --time 2m
-./codex-pass sum --log ./usage --time 1h
-./codex-pass sum --log ./usage --time 2d
-./codex-pass sum --log ./usage --time 1M
-./codex-pass sum --log ./usage --human
-./codex-pass --log ./usage --time 1h sum --human
+./codex-pass sum --codexpass-sqlite ./usage
+./codex-pass sum --codexpass-sqlite ./usage --time 2026-06-09,2026-10-10
+./codex-pass sum --codexpass-sqlite ./usage --time 2026-06-09-10-00,2026-10-10-08-45
+./codex-pass sum --codexpass-sqlite ./usage --time 2m
+./codex-pass sum --codexpass-sqlite ./usage --time 1h
+./codex-pass sum --codexpass-sqlite ./usage --time 2d
+./codex-pass sum --codexpass-sqlite ./usage --time 1M
+./codex-pass sum --codexpass-sqlite ./usage --human
+./codex-pass --codexpass-sqlite ./usage --time 1h sum --human
 ```
 
-`--log`、`--time`、`--human`、`--price` 是公共参数，可放在 `sum` 或 `req` 前后；重复指定时以后面的值为准。两个查询命令都必须提供 `--log DIR`。`sum` 暂无专属参数，`req` 的专属排序和数量参数见下文。使用 `./codex-pass --help` 查看全部命令和参数，使用 `./codex-pass sum --help` 或 `./codex-pass req --help` 查看对应命令帮助。
+`--codexpass-sqlite`、`--time`、`--human`、`--price` 是公共参数，可放在 `sum` 或 `req` 前后，重复指定时以后面的值为准。两个查询命令都需通过 `--codexpass-sqlite DIR` 或 `CODEXPASS_SQLITE` 指定 SQLite 目录。使用 `./codex-pass --help` 查看全部命令和参数，使用 `./codex-pass sum --help` 或 `./codex-pass req --help` 查看对应命令帮助。
 
 汇总会输出全部请求的成功、失败、取消、未结束次数，以及输入、缓存写入、缓存读取、输出、思考 Token；同一组指标也会按模型分别输出。`sum` 或 `req` 指向不存在的数据库会报错，避免目录拼写错误时得到空统计。
 
@@ -83,14 +83,15 @@ go build -o codex-pass ./cmd/codex-pass
 使用 `req` 查看时间范围内的每一条请求：
 
 ```bash
-./codex-pass req --log ./usage --time 1h --human
-./codex-pass --log ./usage --time 2m req --asc
-./codex-pass req --log ./usage --time 1M --desc --human
-./codex-pass req --log ./usage --num 20
-./codex-pass req --log ./usage --time 1h --num 50 --human
+./codex-pass req --codexpass-sqlite ./usage --time 1h --human
+./codex-pass --codexpass-sqlite ./usage --time 2m req --asc
+./codex-pass req --codexpass-sqlite ./usage --time 1M --desc --human
+./codex-pass req --codexpass-sqlite ./usage --num 20
+./codex-pass req --codexpass-sqlite ./usage --time 1h --num 50 --human
+CODEXPASS_SQLITE=./usage ./codex-pass req --models gpt-6-astra,gpt-6-luna --num 20
 ```
 
-`req` 输出两张英文表格：第一张 `Request Counts` 包含实际选中请求的全局及按模型统计，不限制条数时与同一时间范围的 `sum` 请求次数表一致；第二张 `Request Logs` 列出以下字段：
+`req` 输出 `Request Counts` 和 `Request Logs` 两张英文表格。`Request Counts` 包含实际选中请求的全局及按模型统计，未指定模型筛选和条数限制时与同一时间范围的 `sum` 请求次数表一致。`Request Logs` 包含下列字段。
 
 | 列名 | 内容 |
 | --- | --- |
@@ -103,9 +104,9 @@ go build -o codex-pass ./cmd/codex-pass
 
 默认按请求开始时间降序排列，最近的请求在前。`req --asc` 改为升序，`req --desc` 显式指定降序；这两个专属参数放在 `req` 后面，不能同时启用。时间戳相同时按请求 ID 确定顺序。
 
-`req --num N` 最多输出 N 条请求，N 必须为正整数，此专属参数放在 `req` 后面。查询先按 `--time` 筛选，再按指定顺序取前 N 条；默认取最近 N 条，配合 `--asc` 时取最早 N 条。只指定 `--num`、不指定 `--time` 时，默认从全部日志中选取最近 N 条。匹配记录不足 N 条时全部输出；未指定 `--num` 时不限制条数，未指定 `--time` 时不限制时间范围。
+`req --models MODEL` 精确匹配记录中的模型名，可用逗号分隔多个模型。`req --num N` 最多输出 N 条请求，N 必须为正整数。查询先应用 `--time` 和 `--models`，再按指定顺序取前 N 条。默认取最近 N 条，配合 `--asc` 时取最早 N 条。匹配记录不足 N 条时全部输出。
 
-指定 `--num` 后，`Request Counts`、模型费用和 `Sum` 金额均只统计实际选中的请求，报告标题会显示数量上限。
+`Request Counts`、模型费用和 `Sum` 金额均按实际选中的请求计算。报告标题会显示指定的模型和数量上限。
 
 未结束请求的耗时、缺失的 Token 数，以及输入 Token 为零或数据缺失时的缓存命中率显示 `-`。没有匹配请求时，次数表显示零，日志表保留表头。
 
@@ -116,8 +117,8 @@ go build -o codex-pass ./cmd/codex-pass
 传入 `--price FILE`，按指定 JSON 价格表计算所选时间范围的费用：
 
 ```bash
-./codex-pass sum --log ./usage --time 1M --price ./prices.example.json --human
-./codex-pass --price ./prices.example.json req --log ./usage --time 1h --human
+./codex-pass sum --codexpass-sqlite ./usage --time 1M --price ./prices.example.json --human
+./codex-pass --price ./prices.example.json req --codexpass-sqlite ./usage --time 1h --human
 ```
 
 价格表格式见 [prices.example.json](prices.example.json)，示例使用用户提供的数值。必填字段为 `currency`、`unit`、`service_tier`、`context_threshold`、`models`。目前 `unit` 支持 `per_token`；`context_threshold` 必须为正整数。每个模型都需提供 `short_context`、`long_context`，两者均包含非负 JSON 数字 `input`、`cached_input`、`output`，允许单价为零。模型名与日志中的模型名精确匹配。
@@ -192,7 +193,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 在现有启动命令中加入 `--codex` 即可同时提供这两个入口，原来的 Key 和 Auth File 继续使用：
 
 ```bash
-./codex-pass --key sk-local-secret --codex --log ./usage /path/to/copied-auth.json
+./codex-pass --key sk-local-secret --codex --codexpass-sqlite ./usage /path/to/copied-auth.json
 ```
 
 使用新入口时，在用户级 `~/.codex/config.toml` 中选择内置提供方，覆盖基础地址，并保持客户端的 ChatGPT 登录：
@@ -247,13 +248,13 @@ model_catalog_url = "http://127.0.0.1:8317/v1/models"
 
 推理请求的上游固定为 `https://chatgpt.com/backend-api/codex/responses`，模型目录请求的上游固定为 `https://chatgpt.com/backend-api/codex/models`。代理替换客户端的 `Authorization` 和 `ChatGPT-Account-ID`，并保留客户端显式提供的 `session-id`、`thread-id`、`originator` 等非认证头。没有显式 `session-id` 时，若推理请求包含字符串 `prompt_cache_key`，代理将该值作为上游 `session-id`。
 
-多个 Auth File 不会轮询：相同 `prompt_cache_key` 始终选择同一账号；没有缓存键时，使用 `session-id` 做稳定选择；二者均无时使用第一个账号。OAuth Access Token 是 JWT 时，代理在到期前 5 分钟刷新；同一个 Auth File 的并发刷新会合并为一次请求。若上游在尚未输出前返回 401，会强制刷新后重试一次。
+多个 Auth File 按文件去重，再按 `prompt_cache_key` 或 `session-id` 做稳定选择。两者均无时使用第一个文件。OAuth Access Token 是 JWT 时，代理在到期前 5 分钟检查是否需要刷新。刷新前会获取认证文件旁的锁并重新读盘。若上游在尚未输出前返回 401，会先复用磁盘上的有效新令牌，必要时才刷新，然后重试一次。
 
 代理使用官方 Codex CLI 源码中可确认的 OAuth refresh JSON grant、`ChatGPT-Account-ID`、`session-id`、`thread-id`、`originator` 和 User-Agent 协议习惯；它不生成或注入 Codex 的私有 turn metadata。
 
 ## Debug 日志
 
-`--debug` 输出权限为 `0600` 的 JSON Lines。每条记录都有 `timestamp`、`request_id` 和 `stage`。主要阶段包括：
+`--codexpass-debug` 或 `CODEXPASS_DEBUG` 指定权限为 `0600` 的 JSON Lines 调试日志路径。每条记录都有 `timestamp`、`request_id` 和 `stage`。主要阶段包括：
 
 - `CLIENT_REQUEST`、`AUTH_SELECTION`、`UPSTREAM_REQUEST`、`UPSTREAM_RESPONSE_HEADERS`
 - `UPSTREAM_SSE`、`UPSTREAM_COMPLETED`、`CLIENT_RESPONSE`、`REQUEST_SUMMARY`
@@ -298,4 +299,4 @@ scripts/probe_fast.sh \
 
 ## 范围
 
-未提供 Web 管理面板、用户系统、模型映射、参数修复、请求内容缓存、负载均衡或 WebSocket。`--log` 仅提供本地 SQLite 用量统计，不提供 Web 管理界面。非流式 SSE 未出现 `response.completed` 时，代理返回明确的 502 聚合失败，不会伪造成功结果。
+未提供 Web 管理面板、用户系统、模型映射、参数修复、请求内容缓存、负载均衡或 WebSocket。`--codexpass-sqlite` 仅提供本地 SQLite 用量统计，不提供 Web 管理界面。非流式 SSE 未出现 `response.completed` 时，代理返回明确的 502 聚合失败，不会伪造成功结果。

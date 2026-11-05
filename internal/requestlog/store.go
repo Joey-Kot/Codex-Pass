@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	// DatabaseFilename is the fixed SQLite filename created below --log's
-	// directory argument.
+	// DatabaseFilename is the fixed SQLite filename in the configured log directory.
 	DatabaseFilename = "codex-pass.sqlite"
 
 	schemaVersion = 1
@@ -96,7 +95,7 @@ func Open(directory string) (*Store, error) {
 }
 
 // OpenExisting opens an existing database for sum or req. It refuses to create
-// an empty database so a misspelled --log directory cannot look like zero use.
+// an empty database so a misspelled log directory cannot look like zero use.
 func OpenExisting(directory string) (*Store, error) {
 	path, err := databasePath(directory)
 	if err != nil {

@@ -41,7 +41,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$bin" --key "$key" --listen "$listen" --debug "$workdir/proxy.jsonl" "$auth" &
+"$bin" --key "$key" --listen "$listen" --codexpass-debug "$workdir/proxy.jsonl" "$auth" &
 proxy_pid=$!
 ready=false
 for attempt in 1 2 3 4 5 6 7 8 9 10; do

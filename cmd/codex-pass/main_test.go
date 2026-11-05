@@ -167,13 +167,13 @@ func TestQueryCommandsDoNotRequireKeyOrAuthFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, arguments := range [][]string{
-		{"sum", "--log", directory},
-		{"--log", directory, "sum"},
-		{"--time", "1h", "sum", "--log", directory, "--human"},
-		{"req", "--log", directory},
-		{"--log", directory, "req", "--asc"},
-		{"--time", "2m", "req", "--log", directory, "--human", "--desc"},
-		{"req", "--log", directory, "--num", "10"},
+		{"sum", "--codexpass-sqlite", directory},
+		{"--codexpass-sqlite", directory, "sum"},
+		{"--time", "1h", "sum", "--codexpass-sqlite", directory, "--human"},
+		{"req", "--codexpass-sqlite", directory},
+		{"--codexpass-sqlite", directory, "req", "--asc"},
+		{"--time", "2m", "req", "--codexpass-sqlite", directory, "--human", "--desc"},
+		{"req", "--codexpass-sqlite", directory, "--num", "10"},
 	} {
 		if code := run(arguments); code != 0 {
 			t.Fatalf("run(%q) code = %d, want 0", arguments, code)

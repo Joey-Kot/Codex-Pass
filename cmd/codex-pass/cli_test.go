@@ -17,37 +17,37 @@ func TestSumCommonOptions(t *testing.T) {
 	}{
 		{
 			name:      "after command",
-			arguments: []string{"sum", "--log", "usage", "--time", "1h", "--human"},
+			arguments: []string{"sum", "--codexpass-sqlite", "usage", "--time", "1h", "--human"},
 			want:      commonOptions{logDirectory: "usage", timeRange: "1h", humanReadable: true},
 		},
 		{
 			name:      "before command",
-			arguments: []string{"--log", "usage", "--time", "2m", "--human", "sum"},
+			arguments: []string{"--codexpass-sqlite", "usage", "--time", "2m", "--human", "sum"},
 			want:      commonOptions{logDirectory: "usage", timeRange: "2m", humanReadable: true},
 		},
 		{
 			name:      "both sides of command",
-			arguments: []string{"--log", "usage", "sum", "--time", "1M", "--human"},
+			arguments: []string{"--codexpass-sqlite", "usage", "sum", "--time", "1M", "--human"},
 			want:      commonOptions{logDirectory: "usage", timeRange: "1M", humanReadable: true},
 		},
 		{
 			name:      "equals syntax",
-			arguments: []string{"--log=usage", "--human=true", "sum", "--time=1h"},
+			arguments: []string{"--codexpass-sqlite=usage", "--human=true", "sum", "--time=1h"},
 			want:      commonOptions{logDirectory: "usage", timeRange: "1h", humanReadable: true},
 		},
 		{
 			name:      "later options override earlier values",
-			arguments: []string{"--log", "old", "--time", "2m", "--human", "sum", "--log", "usage", "--time", "1h", "--human=false"},
+			arguments: []string{"--codexpass-sqlite", "old", "--time", "2m", "--human", "sum", "--codexpass-sqlite", "usage", "--time", "1h", "--human=false"},
 			want:      commonOptions{logDirectory: "usage", timeRange: "1h"},
 		},
 		{
 			name:      "command name as option value",
-			arguments: []string{"--log", "sum", "sum"},
+			arguments: []string{"--codexpass-sqlite", "sum", "sum"},
 			want:      commonOptions{logDirectory: "sum"},
 		},
 		{
 			name:      "terminator as option value",
-			arguments: []string{"--log", "--", "sum"},
+			arguments: []string{"--codexpass-sqlite", "--", "sum"},
 			want:      commonOptions{logDirectory: "--"},
 		},
 	}
@@ -66,6 +66,8 @@ func TestSumCommonOptions(t *testing.T) {
 }
 
 func TestProxyCommandLine(t *testing.T) {
+	t.Setenv("CODEXPASS_SQLITE", "")
+	t.Setenv("CODEXPASS_DEBUG", "")
 	tests := []struct {
 		name      string
 		arguments []string
@@ -73,7 +75,7 @@ func TestProxyCommandLine(t *testing.T) {
 	}{
 		{
 			name:      "proxy and common options",
-			arguments: []string{"--key", "test-key", "--log", "usage", "--time", "1h", "--human", "--debug", "proxy.jsonl", "--listen", "127.0.0.1:9000", "auth.json", "second.json"},
+			arguments: []string{"--key", "test-key", "--codexpass-sqlite", "usage", "--time", "1h", "--human", "--codexpass-debug", "proxy.jsonl", "--listen", "127.0.0.1:9000", "auth.json", "second.json"},
 			want: commandLine{
 				common:    commonOptions{logDirectory: "usage", timeRange: "1h", humanReadable: true},
 				proxy:     proxyOptions{apiKey: "test-key", debugPath: "proxy.jsonl", listen: "127.0.0.1:9000"},
@@ -90,7 +92,7 @@ func TestProxyCommandLine(t *testing.T) {
 		},
 		{
 			name:      "command name as key and log directory",
-			arguments: []string{"--key", "sum", "--log", "sum", "auth.json"},
+			arguments: []string{"--key", "sum", "--codexpass-sqlite", "sum", "auth.json"},
 			want: commandLine{
 				common:    commonOptions{logDirectory: "sum"},
 				proxy:     proxyOptions{apiKey: "sum"},
@@ -128,20 +130,51 @@ func TestProxyCommandLine(t *testing.T) {
 	}
 }
 
+func TestSQLiteAndDebugEnvironment(t *testing.T) {
+	t.Setenv("CODEXPASS_SQLITE", "environment-directory")
+	t.Setenv("CODEXPASS_DEBUG", "environment.jsonl")
+	for _, test := range []struct {
+		arguments []string
+		directory string
+		debug     string
+	}{
+		{[]string{"--key", "test-key", "auth.json"}, "environment-directory", "environment.jsonl"},
+		{[]string{"--key", "test-key", "--codexpass-sqlite", "cli-directory", "--codexpass-debug=cli.jsonl", "auth.json"}, "cli-directory", "cli.jsonl"},
+		{[]string{"--key", "test-key", "--codexpass-sqlite=", "--codexpass-debug=", "auth.json"}, "", ""},
+		{[]string{"sum"}, "environment-directory", ""},
+		{[]string{"req", "--models", "one,two"}, "environment-directory", ""},
+		{[]string{"--codexpass-sqlite", "before-command", "sum"}, "before-command", ""},
+		{[]string{"--codexpass-sqlite", "before-command", "req", "--codexpass-sqlite", "after-command"}, "after-command", ""},
+		{[]string{"quota", "auth.json"}, "", ""},
+	} {
+		var output bytes.Buffer
+		options, err := parseCommandLine(test.arguments, &output)
+		if err != nil || options.common.logDirectory != test.directory || options.proxy.debugPath != test.debug {
+			t.Errorf("parseCommandLine(%q) = SQLite %q, debug %q, error %v\n%s", test.arguments, options.common.logDirectory, options.proxy.debugPath, err, output.String())
+		}
+	}
+	var output bytes.Buffer
+	if _, err := parseCommandLine([]string{"req", "--codexpass-sqlite="}, &output); err == nil || !strings.Contains(output.String(), "requires --codexpass-sqlite") {
+		t.Fatalf("explicit empty SQLite path fell back to the environment: %v\n%s", err, output.String())
+	}
+}
+
 func TestReqCommandOptions(t *testing.T) {
 	tests := []struct {
 		name      string
 		arguments []string
 		want      requestOptions
 	}{
-		{name: "default order", arguments: []string{"req", "--log", "usage"}},
-		{name: "ascending", arguments: []string{"req", "--log", "usage", "--asc"}, want: requestOptions{ascending: true}},
-		{name: "descending", arguments: []string{"req", "--log", "usage", "--desc"}, want: requestOptions{descending: true}},
-		{name: "common options on both sides", arguments: []string{"--log", "usage", "--time", "1h", "req", "--human", "--asc"}, want: requestOptions{ascending: true}},
-		{name: "disabled ascending", arguments: []string{"req", "--log", "usage", "--asc=false", "--desc"}, want: requestOptions{descending: true}},
-		{name: "number only", arguments: []string{"req", "--log", "usage", "--num", "20"}, want: requestOptions{num: 20}},
-		{name: "number with time and order", arguments: []string{"--time", "2m", "req", "--log", "usage", "--num=5", "--asc"}, want: requestOptions{ascending: true, num: 5}},
-		{name: "later number overrides", arguments: []string{"req", "--log", "usage", "--num", "10", "--num", "3"}, want: requestOptions{num: 3}},
+		{name: "default order", arguments: []string{"req", "--codexpass-sqlite", "usage"}},
+		{name: "ascending", arguments: []string{"req", "--codexpass-sqlite", "usage", "--asc"}, want: requestOptions{ascending: true}},
+		{name: "descending", arguments: []string{"req", "--codexpass-sqlite", "usage", "--desc"}, want: requestOptions{descending: true}},
+		{name: "common options on both sides", arguments: []string{"--codexpass-sqlite", "usage", "--time", "1h", "req", "--human", "--asc"}, want: requestOptions{ascending: true}},
+		{name: "disabled ascending", arguments: []string{"req", "--codexpass-sqlite", "usage", "--asc=false", "--desc"}, want: requestOptions{descending: true}},
+		{name: "number only", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "20"}, want: requestOptions{num: 20}},
+		{name: "number with time and order", arguments: []string{"--time", "2m", "req", "--codexpass-sqlite", "usage", "--num=5", "--asc"}, want: requestOptions{ascending: true, num: 5}},
+		{name: "later number overrides", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "10", "--num", "3"}, want: requestOptions{num: 3}},
+		{name: "one model", arguments: []string{"req", "--codexpass-sqlite", "usage", "--models", "gpt-6-sol"}, want: requestOptions{models: []string{"gpt-6-sol"}}},
+		{name: "multiple models", arguments: []string{"req", "--codexpass-sqlite", "usage", "--models=gpt-6-sol, gpt-6-luna"}, want: requestOptions{models: []string{"gpt-6-sol", "gpt-6-luna"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -150,7 +183,7 @@ func TestReqCommandOptions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseCommandLine(%q): %v\n%s", test.arguments, err, output.String())
 			}
-			if got.command != "req" || got.common.logDirectory != "usage" || got.request != test.want {
+			if got.command != "req" || got.common.logDirectory != "usage" || !reflect.DeepEqual(got.request, test.want) {
 				t.Fatalf("parsed options = %#v, want req with %#v", got, test.want)
 			}
 			if test.name == "common options on both sides" && (got.common.timeRange != "1h" || !got.common.humanReadable) {
@@ -163,9 +196,9 @@ func TestReqCommandOptions(t *testing.T) {
 func TestPriceIsACommonOption(t *testing.T) {
 	for _, command := range []string{"sum", "req"} {
 		for _, arguments := range [][]string{
-			{"--price", "prices.json", command, "--log", "usage"},
-			{command, "--log", "usage", "--price", "prices.json"},
-			{"--price=old.json", "--log", "usage", command, "--price=prices.json"},
+			{"--price", "prices.json", command, "--codexpass-sqlite", "usage"},
+			{command, "--codexpass-sqlite", "usage", "--price", "prices.json"},
+			{"--price=old.json", "--codexpass-sqlite", "usage", command, "--price=prices.json"},
 		} {
 			var output bytes.Buffer
 			options, err := parseCommandLine(arguments, &output)
@@ -182,39 +215,51 @@ func TestPriceIsACommonOption(t *testing.T) {
 }
 
 func TestCommandLineRejectsInvalidArguments(t *testing.T) {
+	t.Setenv("CODEXPASS_AUTH_FILE", "")
+	t.Setenv("AUTH_FILE", "legacy.json")
+	t.Setenv("CODEXPASS_SQLITE", "")
 	tests := []struct {
 		name      string
 		arguments []string
 		wantError string
 	}{
-		{name: "missing log", arguments: []string{"sum"}, wantError: "sum requires --log DIR"},
-		{name: "empty log", arguments: []string{"sum", "--log", " "}, wantError: "sum requires --log DIR"},
-		{name: "extra auth file", arguments: []string{"sum", "--log", "usage", "auth.json"}, wantError: "sum does not accept positional arguments"},
-		{name: "old summary flag", arguments: []string{"--summary", "--log", "usage"}, wantError: "flag provided but not defined: -summary"},
-		{name: "old summary flag after command", arguments: []string{"sum", "--summary", "--log", "usage"}, wantError: "flag provided but not defined: -summary"},
-		{name: "proxy flag before sum", arguments: []string{"--key", "test-key", "sum", "--log", "usage"}, wantError: "--key is only available in proxy mode"},
-		{name: "proxy flag after sum", arguments: []string{"sum", "--key", "test-key", "--log", "usage"}, wantError: "flag provided but not defined: -key"},
-		{name: "missing flag value before sum", arguments: []string{"--time"}, wantError: "flag needs an argument: -time"},
-		{name: "missing flag value after sum", arguments: []string{"sum", "--log"}, wantError: "flag needs an argument: -log"},
-		{name: "invalid boolean", arguments: []string{"sum", "--human=maybe"}, wantError: "invalid boolean value"},
+		{name: "missing log", arguments: []string{"sum"}, wantError: "sum requires --codexpass-sqlite DIR"},
+		{name: "empty log", arguments: []string{"sum", "--codexpass-sqlite", " "}, wantError: "sum requires --codexpass-sqlite DIR"},
+		{name: "extra auth file", arguments: []string{"sum", "--codexpass-sqlite", "usage", "auth.json"}, wantError: "sum does not accept positional arguments"},
+		{name: "old summary flag", arguments: []string{"--summary", "--codexpass-sqlite", "usage"}, wantError: "unknown option --summary"},
+		{name: "old summary flag after command", arguments: []string{"sum", "--summary", "--codexpass-sqlite", "usage"}, wantError: "unknown option --summary"},
+		{name: "old SQLite flag", arguments: []string{"sum", "--log", "usage"}, wantError: "unknown option --log"},
+		{name: "old debug flag", arguments: []string{"--debug", "debug.jsonl"}, wantError: "unknown option --debug"},
+		{name: "single dash proxy option", arguments: []string{"-key", "test-key", "auth.json"}, wantError: "invalid option \"-key\""},
+		{name: "single dash help", arguments: []string{"-h"}, wantError: "invalid option \"-h\""},
+		{name: "single dash report option", arguments: []string{"req", "-time", "1h"}, wantError: "invalid option \"-time\""},
+		{name: "single dash account option", arguments: []string{"models", "-client-version", "0.166.0"}, wantError: "invalid option \"-client-version\""},
+		{name: "proxy flag before sum", arguments: []string{"--key", "test-key", "sum", "--codexpass-sqlite", "usage"}, wantError: "--key is only available in proxy mode"},
+		{name: "proxy flag after sum", arguments: []string{"sum", "--key", "test-key", "--codexpass-sqlite", "usage"}, wantError: "unknown option --key"},
+		{name: "missing flag value before sum", arguments: []string{"--time"}, wantError: "option --time requires a value"},
+		{name: "missing flag value after sum", arguments: []string{"sum", "--codexpass-sqlite"}, wantError: "option --codexpass-sqlite requires a value"},
+		{name: "invalid boolean", arguments: []string{"sum", "--human=maybe"}, wantError: "invalid value \"maybe\" for --human"},
 		{name: "missing proxy key", arguments: []string{"auth.json"}, wantError: "--key is required"},
 		{name: "Codex entry still requires proxy key", arguments: []string{"--codex", "auth.json"}, wantError: "--key is required"},
-		{name: "Codex entry is proxy only", arguments: []string{"--codex", "sum", "--log", "usage"}, wantError: "--codex is only available in proxy mode"},
+		{name: "Codex entry is proxy only", arguments: []string{"--codex", "sum", "--codexpass-sqlite", "usage"}, wantError: "--codex is only available in proxy mode"},
 		{name: "missing proxy auth file", arguments: []string{"--key", "test-key"}, wantError: "at least one Codex auth file is required"},
-		{name: "req missing log", arguments: []string{"req"}, wantError: "req requires --log DIR"},
-		{name: "req extra argument", arguments: []string{"req", "--log", "usage", "auth.json"}, wantError: "req does not accept positional arguments"},
-		{name: "conflicting order", arguments: []string{"req", "--log", "usage", "--asc", "--desc"}, wantError: "--asc and --desc cannot be used together"},
-		{name: "sum has no ascending option", arguments: []string{"sum", "--log", "usage", "--asc"}, wantError: "flag provided but not defined: -asc"},
-		{name: "sum has no descending option", arguments: []string{"sum", "--log", "usage", "--desc"}, wantError: "flag provided but not defined: -desc"},
-		{name: "missing price filename", arguments: []string{"req", "--log", "usage", "--price"}, wantError: "flag needs an argument: -price"},
-		{name: "zero request limit", arguments: []string{"req", "--log", "usage", "--num", "0"}, wantError: "--num must be a positive integer"},
-		{name: "negative request limit", arguments: []string{"req", "--log", "usage", "--num", "-1"}, wantError: "--num must be a positive integer"},
-		{name: "fractional request limit", arguments: []string{"req", "--log", "usage", "--num", "1.5"}, wantError: "invalid value"},
-		{name: "invalid request limit", arguments: []string{"req", "--log", "usage", "--num", "many"}, wantError: "invalid value"},
-		{name: "overflowing request limit", arguments: []string{"req", "--log", "usage", "--num", "99999999999999999999999"}, wantError: "invalid value"},
-		{name: "missing request limit", arguments: []string{"req", "--log", "usage", "--num"}, wantError: "flag needs an argument: -num"},
-		{name: "sum has no number option", arguments: []string{"sum", "--log", "usage", "--num", "5"}, wantError: "flag provided but not defined: -num"},
-		{name: "number is not a common option", arguments: []string{"--num", "5", "req", "--log", "usage"}, wantError: "flag provided but not defined: -num"},
+		{name: "req missing log", arguments: []string{"req"}, wantError: "req requires --codexpass-sqlite DIR"},
+		{name: "req extra argument", arguments: []string{"req", "--codexpass-sqlite", "usage", "auth.json"}, wantError: "req does not accept positional arguments"},
+		{name: "conflicting order", arguments: []string{"req", "--codexpass-sqlite", "usage", "--asc", "--desc"}, wantError: "--asc and --desc cannot be used together"},
+		{name: "sum has no ascending option", arguments: []string{"sum", "--codexpass-sqlite", "usage", "--asc"}, wantError: "unknown option --asc"},
+		{name: "sum has no descending option", arguments: []string{"sum", "--codexpass-sqlite", "usage", "--desc"}, wantError: "unknown option --desc"},
+		{name: "missing price filename", arguments: []string{"req", "--codexpass-sqlite", "usage", "--price"}, wantError: "option --price requires a value"},
+		{name: "zero request limit", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "0"}, wantError: "--num must be a positive integer"},
+		{name: "negative request limit", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "-1"}, wantError: "--num must be a positive integer"},
+		{name: "fractional request limit", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "1.5"}, wantError: "invalid value"},
+		{name: "invalid request limit", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "many"}, wantError: "invalid value"},
+		{name: "overflowing request limit", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num", "99999999999999999999999"}, wantError: "invalid value"},
+		{name: "missing request limit", arguments: []string{"req", "--codexpass-sqlite", "usage", "--num"}, wantError: "option --num requires a value"},
+		{name: "sum has no number option", arguments: []string{"sum", "--codexpass-sqlite", "usage", "--num", "5"}, wantError: "unknown option --num"},
+		{name: "number is not a common option", arguments: []string{"--num", "5", "req", "--codexpass-sqlite", "usage"}, wantError: "unknown option --num"},
+		{name: "empty model list", arguments: []string{"req", "--models="}, wantError: "model names must not be empty"},
+		{name: "empty model in list", arguments: []string{"req", "--models", "a,,b"}, wantError: "model names must not be empty"},
+		{name: "sum has no model filter", arguments: []string{"sum", "--models", "a,b"}, wantError: "unknown option --models"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -231,31 +276,45 @@ func TestCommandLineRejectsInvalidArguments(t *testing.T) {
 }
 
 func TestCommandLineHelp(t *testing.T) {
-	for _, arguments := range [][]string{{"--help"}, {"sum", "--help"}, {"--human", "sum", "--help"}, {"req", "--help"}} {
+	for _, arguments := range [][]string{{"--help"}, {"sum", "--help"}, {"--human", "sum", "--help"}, {"req", "--help"}, {"models", "--help"}} {
 		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
 			var output bytes.Buffer
 			_, err := parseCommandLine(arguments, &output)
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("help error = %v, want flag.ErrHelp", err)
 			}
-			for _, value := range []string{"Common options", "-log", "-time", "-human", "-price"} {
+			for _, line := range strings.Split(output.String(), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "-") && !strings.HasPrefix(trimmed, "--") {
+					t.Errorf("help advertises a single-dash option: %q", line)
+				}
+			}
+			if arguments[0] == "models" {
+				for _, value := range []string{"--client-version", "CODEXPASS_AUTH_FILE"} {
+					if !strings.Contains(output.String(), value) {
+						t.Errorf("models help does not contain %q:\n%s", value, output.String())
+					}
+				}
+				return
+			}
+			for _, value := range []string{"Common options", "--codexpass-sqlite", "CODEXPASS_SQLITE", "--time", "--human", "--price"} {
 				if !strings.Contains(output.String(), value) {
 					t.Errorf("help does not contain %q:\n%s", value, output.String())
 				}
 			}
-			if strings.Contains(output.String(), "-summary") {
+			if strings.Contains(output.String(), "--summary") {
 				t.Errorf("help still advertises the removed summary flag:\n%s", output.String())
 			}
-			if strings.Contains(strings.Join(arguments, " "), "sum") && strings.Contains(output.String(), "-key") {
+			if strings.Contains(strings.Join(arguments, " "), "sum") && strings.Contains(output.String(), "--key") {
 				t.Errorf("sum help contains proxy options:\n%s", output.String())
 			}
 			if arguments[0] == "req" {
-				for _, value := range []string{"req", "Request options", "-asc", "-desc", "-num"} {
+				for _, value := range []string{"req", "Request options", "--asc", "--desc", "--num", "--models"} {
 					if !strings.Contains(output.String(), value) {
 						t.Errorf("req help does not contain %q:\n%s", value, output.String())
 					}
 				}
-				if strings.Contains(output.String(), "-key") {
+				if strings.Contains(output.String(), "--key") {
 					t.Errorf("req help contains proxy options:\n%s", output.String())
 				}
 			}

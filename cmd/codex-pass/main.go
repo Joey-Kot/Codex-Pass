@@ -38,6 +38,10 @@ func run(arguments []string) int {
 		return runSummaryWithOptions(options.common, os.Stdout, os.Stderr)
 	case "req":
 		return runRequestLogs(options.common, options.request, os.Stdout, os.Stderr)
+	case "quota", "reset", "models":
+		client := proxy.NewHTTPClient()
+		client.Timeout = 20 * time.Second
+		return runAccountCommand(context.Background(), options, client, os.Stdin, os.Stdout, os.Stderr)
 	default:
 		return runProxy(options.common, options.proxy, options.authFiles)
 	}

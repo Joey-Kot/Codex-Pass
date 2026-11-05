@@ -22,12 +22,12 @@ Codex-Pass 是一个通过 ChatGPT 账号访问 Codex 模型的本地代理。�
 将 Codex 认证文件复制到专用位置，然后启动代理：
 
 ```bash
-./codex-pass --key sk-local-secret --log ./usage /path/to/copied-auth.json
+./codex-pass --key sk-local-secret --codexpass-sqlite ./usage /path/to/copied-auth.json
 ```
 
 默认监听地址为 `127.0.0.1:8317`。Windows 下使用 `codex-pass.exe`，参数相同。所有代理参数都必须放在认证文件路径之前；可以传入多个认证文件。
 
-`--key` 必填，并且至少需要一个认证文件。代理支持官方 Codex 格式和已支持的 CPA 展平格式。上游凭据刷新后会写回传入的文件，因此认证文件及其父目录必须可写。建议使用专用副本，避免与其他会刷新凭据的程序共用同一个文件。
+`--key` 必填，并且至少需要一个认证文件。可以直接传入文件路径，也可以设置 `CODEXPASS_AUTH_FILE`。支持官方 Codex 格式和已支持的 CPA 展平格式。可为每个账户准备一份可写副本，供 Codex-Pass 代理和账户命令共用。刷新通过同目录的 `.codex-pass.lock` 后缀文件协调，令牌会原子写回认证文件实际所在的路径，其父目录需要可写。
 
 ### 选择客户端路径
 
@@ -79,7 +79,7 @@ supports_standalone_web_search = true
 在代理启动命令中加入 `--codex`，即可在保留 `/v1` 的同时启用专用路径：
 
 ```bash
-./codex-pass --key sk-local-secret --codex --log ./usage /path/to/copied-auth.json
+./codex-pass --key sk-local-secret --codex --codexpass-sqlite ./usage /path/to/copied-auth.json
 ```
 
 保持 Codex 使用 ChatGPT 登录。在用户级 `~/.codex/config.toml` 的第一个 TOML 表之前设置以下顶层配置：
@@ -112,9 +112,12 @@ Codex 为这些内置工具使用独立接口：
 ### 命令和参数
 
 ```text
-codex-pass [options] --key KEY [--codex] AUTH_FILE [AUTH_FILE ...]
-codex-pass sum --log DIR [report options]
-codex-pass req --log DIR [report options] [--asc | --desc] [--num N]
+codex-pass [options] --key KEY [--codex] [AUTH_FILE ...]
+codex-pass sum [--codexpass-sqlite DIR] [report options]
+codex-pass req [--codexpass-sqlite DIR] [report options] [--asc | --desc] [--num N] [--models MODEL[,MODEL...]]
+codex-pass quota [AUTH_FILE ...]
+codex-pass reset [N] [AUTH_FILE ...]
+codex-pass models [--client-version VERSION] [AUTH_FILE ...]
 ```
 
 | 参数 | 适用范围 | 说明 |
@@ -122,27 +125,45 @@ codex-pass req --log DIR [report options] [--asc | --desc] [--num N]
 | `--key KEY` | 代理 | `/v1` 使用的 Bearer Key，必填；启用 `--codex` 后仍然必填。 |
 | `--listen ADDRESS` | 代理 | 监听地址，优先于 `CODEX_PROXY_LISTEN`，默认为 `127.0.0.1:8317`。 |
 | `--codex` | 代理 | 启用 Codex 专用的推理、模型目录、联网和图片路径，默认关闭。 |
-| `--debug FILE` | 代理 | 写入详细的 JSON Lines 调试日志，并对凭据脱敏。 |
-| `--log DIR` | 代理和报表 | 写入或查询 `DIR/codex-pass.sqlite`；`sum` 和 `req` 必填。 |
+| `--codexpass-debug FILE` | 代理 | 将脱敏后的 JSON Lines 调试日志写入 `FILE`，默认读取 `CODEXPASS_DEBUG`。 |
+| `--codexpass-sqlite DIR` | 代理和报表 | 写入或查询 `DIR/codex-pass.sqlite`，默认读取 `CODEXPASS_SQLITE`。`sum` 和 `req` 必须通过其中一种方式指定目录。 |
 | `--time RANGE` | 报表 | 按请求开始时间筛选，默认查询全部记录。 |
 | `--human` | 报表 | 使用 K/M/B 单位简化请求次数和 Token 数的显示。 |
 | `--price FILE` | 报表 | 根据 JSON 价格表估算费用，参见 [prices.example.json](prices.example.json)。 |
 | `--asc` / `--desc` | `req` | 按从旧到新或从新到旧排序，默认从新到旧；两个参数互斥。 |
 | `--num N` | `req` | 筛选和排序后，最多显示指定数量的请求；必须为正整数。 |
+| `--models MODEL[,MODEL...]` | `req` | 精确匹配一个或多个已记录的模型名，先筛选再排序和应用 `--num`。 |
 | `--help` | 所有命令 | 显示对应命令的帮助。 |
 
-公共参数 `--log`、`--time`、`--human` 和 `--price` 可以放在 `sum` 或 `req` 前后。请求明细专用参数需要放在 `req` 后面。报表命令不会启动代理，也不需要凭据。
+所有选项均使用 `--选项名`。命令行传入的路径优先于环境变量。公共参数 `--codexpass-sqlite`、`--time`、`--human` 和 `--price` 可以放在 `sum` 或 `req` 前后。请求明细专用参数需要放在 `req` 后面。报表命令不会启动代理，也不需要凭据。
 
 ```bash
-./codex-pass sum --log ./usage --time 1h --human
-./codex-pass req --log ./usage --time 1d --num 20
-./codex-pass req --log ./usage --asc --num 10 --price ./prices.example.json
+./codex-pass sum --codexpass-sqlite ./usage --time 1h --human
+./codex-pass req --codexpass-sqlite ./usage --time 1d --num 20
+./codex-pass req --codexpass-sqlite ./usage --asc --num 10 --price ./prices.example.json
+CODEXPASS_SQLITE=./usage ./codex-pass req --models gpt-6-astra,gpt-6-luna --num 20
 ./codex-pass req --help
 ```
 
 时间范围支持 `2m`、`1h`、`2d`、`1w`、`3M`、`1y` 等时长，也支持 `2026-10-01,2026-10-28` 这样的本地日期范围，包含起止日期。需要精确到分钟时，使用 `YYYY-MM-DD-HH-MM,YYYY-MM-DD-HH-MM`。小写 `m` 表示分钟，大写 `M` 表示日历月。
 
-用量报表包含请求结果、模型名称、思考强度，以及上游实际返回的 Token 数。缺失的用量保持未知。SQLite 只保存元数据，不保存提示词或凭据；详细调试日志则包含请求和响应正文。
+用量报表包含请求结果、模型名称、思考强度，以及上游实际返回的 Token 数。`req` 的明细、请求次数和费用按同一批筛选结果计算。缺失的用量保持未知。SQLite 只保存元数据，不保存提示词或凭据；详细调试日志则包含请求和响应正文。
+
+### 账户周配额、重置券和模型
+
+账户命令和代理都可以从环境变量 `CODEXPASS_AUTH_FILE` 读取一个或多个 Codex 或 CPA 认证文件。Linux 和 macOS 用冒号 `:` 分隔路径，Windows 用分号 `;`。命令行传入文件路径时，本次只使用这些路径。同一文件只处理一次，以首次传入的路径和顺序为准。账户命令直接访问 ChatGPT，并沿用代理的令牌刷新机制。
+
+```bash
+export CODEXPASS_AUTH_FILE='/path/to/first.json:/path/with spaces/second.json'
+./codex-pass quota
+./codex-pass reset
+./codex-pass reset 2
+./codex-pass models /path/to/another.json /path/to/fourth.json
+```
+
+- `quota` 按认证文件分组，显示各个周配额窗口的已用比例、剩余比例和下次重置时间。
+- `reset` 显示可用重置券总数，并用一张表列出券号、认证文件名和到期时间。所有文件的券详情完整后才可编号和兑换。券号从 `1` 开始，按文件传入顺序排列，同一文件内按领取时间从早到晚。`reset N` 重新读取当前列表，显示所选券和所属文件，再提示 `[y/N]`。只有输入 `y` 或 `Y` 才会兑换，直接回车、输入无效或标准输入关闭都会取消。时间使用运行机器的本地时区。
+- `models` 按认证文件分组，分别显示各账户的 Codex 和 ChatGPT 模型目录，保留 Codex 选择器隐藏的条目。可通过 `--client-version VERSION` 指定 Codex 目录版本。ChatGPT 目录会标注哪些模型提供图像工具。单列的 `gpt-image-2` 是 Codex 内置图像工具的默认模型，工具权限取决于账户套餐和工作区设置。 [OpenAI 图像生成文档](https://learn.chatgpt.com/docs/image-generation)
 
 ### 从源码构建
 

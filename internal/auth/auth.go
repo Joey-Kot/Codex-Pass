@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,17 +26,16 @@ const (
 // Credential is one independently refreshable Codex account.
 // Fields accessed outside this package are exposed only through Snapshot.
 type Credential struct {
-	path   string
-	format string
+	path         string
+	resolvedPath string
 
 	mu           sync.Mutex
+	format       string
 	root         map[string]json.RawMessage
 	accessToken  string
 	refreshToken string
 	accountID    string
 	lastRefresh  time.Time
-	accessField  string
-	refreshField string
 }
 
 // Snapshot is a non-secret metadata and token snapshot for creating an
@@ -69,10 +69,30 @@ func (c *Credential) Format() string {
 
 // Load validates a Codex auth file without emitting any credential material.
 func Load(path string) (*Credential, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, errors.New("auth file path is empty")
+	resolved, err := resolveAuthPath(path)
+	if err != nil {
+		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	return loadResolvedCredential(path, resolved)
+}
+
+func resolveAuthPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("auth file path is empty")
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve auth file %q: %w", path, err)
+	}
+	resolved, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute auth file %q: %w", path, err)
+	}
+	return resolved, nil
+}
+
+func loadResolvedCredential(path, resolved string) (*Credential, error) {
+	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("read auth file %q: %w", path, err)
 	}
@@ -84,25 +104,50 @@ func Load(path string) (*Credential, error) {
 		return nil, fmt.Errorf("auth file %q must contain a JSON object", path)
 	}
 
+	var credential *Credential
 	if mode, ok := stringField(root, "auth_mode"); ok && strings.EqualFold(mode, "chatgpt") {
-		return parseOfficial(path, root)
+		credential, err = parseOfficial(path, root)
+	} else if typ, ok := stringField(root, "type"); ok && strings.EqualFold(typ, "codex") {
+		credential, err = parseFlattened(path, root)
+	} else {
+		return nil, fmt.Errorf("auth file %q has an unknown format: expected official auth_mode=chatgpt with tokens, or flattened type=codex", path)
 	}
-	if typ, ok := stringField(root, "type"); ok && strings.EqualFold(typ, "codex") {
-		return parseFlattened(path, root)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("auth file %q has an unknown format: expected official auth_mode=chatgpt with tokens, or flattened type=codex", path)
+	credential.resolvedPath = resolved
+	return credential, nil
 }
 
+// LoadAll preserves the first supplied path for each distinct file.
 func LoadAll(paths []string) ([]*Credential, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("at least one Codex auth file is required")
 	}
 	credentials := make([]*Credential, 0, len(paths))
+	seenPaths := make(map[string]struct{}, len(paths))
+	seenFiles := make([]os.FileInfo, 0, len(paths))
 	for _, path := range paths {
-		credential, err := Load(path)
+		resolved, err := resolveAuthPath(path)
 		if err != nil {
 			return nil, err
 		}
+		if _, seen := seenPaths[resolved]; seen {
+			continue
+		}
+		seenPaths[resolved] = struct{}{}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("stat auth file %q: %w", path, err)
+		}
+		if slices.ContainsFunc(seenFiles, func(previous os.FileInfo) bool { return os.SameFile(info, previous) }) {
+			continue
+		}
+		credential, err := loadResolvedCredential(path, resolved)
+		if err != nil {
+			return nil, err
+		}
+		seenFiles = append(seenFiles, info)
 		credentials = append(credentials, credential)
 	}
 	return credentials, nil
@@ -122,21 +167,20 @@ func parseOfficial(path string, root map[string]json.RawMessage) (*Credential, e
 	}
 	return &Credential{
 		path: path, format: "official", root: root, accessToken: access, refreshToken: refresh, accountID: account,
-		accessField: "access_token", refreshField: "refresh_token",
 		lastRefresh: parseTimeField(root, "last_refresh"),
 	}, nil
 }
 
 func parseFlattened(path string, root map[string]json.RawMessage) (*Credential, error) {
-	access, accessField, accessOK, err := oneOfString(root, "access_token", "accessToken")
+	access, accessOK, err := oneOfString(root, "access_token", "accessToken")
 	if err != nil {
 		return nil, fmt.Errorf("flattened auth file %q: %w", path, err)
 	}
-	refresh, refreshField, refreshOK, err := oneOfString(root, "refresh_token", "refreshToken")
+	refresh, refreshOK, err := oneOfString(root, "refresh_token", "refreshToken")
 	if err != nil {
 		return nil, fmt.Errorf("flattened auth file %q: %w", path, err)
 	}
-	account, _, accountOK, err := oneOfString(root, "account_id", "chatgpt_account_id", "accountId")
+	account, accountOK, err := oneOfString(root, "account_id", "chatgpt_account_id", "accountId")
 	if err != nil {
 		return nil, fmt.Errorf("flattened auth file %q: %w", path, err)
 	}
@@ -145,7 +189,6 @@ func parseFlattened(path string, root map[string]json.RawMessage) (*Credential, 
 	}
 	return &Credential{
 		path: path, format: "flattened", root: root, accessToken: access, refreshToken: refresh, accountID: account,
-		accessField: accessField, refreshField: refreshField,
 		lastRefresh: parseTimeField(root, "last_refresh"),
 	}, nil
 }
@@ -162,9 +205,8 @@ func stringField(values map[string]json.RawMessage, key string) (string, bool) {
 	return value, true
 }
 
-func oneOfString(values map[string]json.RawMessage, names ...string) (string, string, bool, error) {
+func oneOfString(values map[string]json.RawMessage, names ...string) (string, bool, error) {
 	var result string
-	var resultName string
 	found := false
 	for _, name := range names {
 		value, ok := stringField(values, name)
@@ -172,11 +214,11 @@ func oneOfString(values map[string]json.RawMessage, names ...string) (string, st
 			continue
 		}
 		if found && value != result {
-			return "", "", false, fmt.Errorf("conflicting values for %s", strings.Join(names, ", "))
+			return "", false, fmt.Errorf("conflicting values for %s", strings.Join(names, ", "))
 		}
-		result, resultName, found = value, name, true
+		result, found = value, true
 	}
-	return result, resultName, found, nil
+	return result, found, nil
 }
 
 func parseTimeField(values map[string]json.RawMessage, key string) time.Time {
@@ -227,6 +269,15 @@ func marshalString(value string) json.RawMessage {
 	return raw
 }
 
+func updateTokenAliases(root map[string]json.RawMessage, value string, names ...string) {
+	raw := marshalString(value)
+	for _, name := range names {
+		if _, exists := stringField(root, name); exists {
+			root[name] = raw
+		}
+	}
+}
+
 func (c *Credential) persistLocked(access, refresh, idToken string, now time.Time) error {
 	if c.format == "official" {
 		var tokens map[string]json.RawMessage
@@ -246,9 +297,9 @@ func (c *Credential) persistLocked(access, refresh, idToken string, now time.Tim
 		}
 		c.root["tokens"] = rawTokens
 	} else {
-		c.root[c.accessField] = marshalString(access)
+		updateTokenAliases(c.root, access, "access_token", "accessToken")
 		if refresh != "" {
-			c.root[c.refreshField] = marshalString(refresh)
+			updateTokenAliases(c.root, refresh, "refresh_token", "refreshToken")
 		}
 		if idToken != "" {
 			c.root["id_token"] = marshalString(idToken)
@@ -260,7 +311,7 @@ func (c *Credential) persistLocked(access, refresh, idToken string, now time.Tim
 		return fmt.Errorf("encode auth file: %w", err)
 	}
 	encoded = append(encoded, '\n')
-	directory := filepath.Dir(c.path)
+	directory := filepath.Dir(c.resolvedPath)
 	temporary, err := os.CreateTemp(directory, ".codex-pass-auth-*")
 	if err != nil {
 		return fmt.Errorf("create temporary auth file: %w", err)
@@ -282,11 +333,8 @@ func (c *Credential) persistLocked(access, refresh, idToken string, now time.Tim
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary auth file: %w", err)
 	}
-	if err := os.Rename(temporaryName, c.path); err != nil {
+	if err := os.Rename(temporaryName, c.resolvedPath); err != nil {
 		return fmt.Errorf("atomically replace auth file: %w", err)
-	}
-	if err := os.Chmod(c.path, 0o600); err != nil {
-		return fmt.Errorf("set auth file permissions: %w", err)
 	}
 	c.accessToken = access
 	if refresh != "" {

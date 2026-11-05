@@ -46,7 +46,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 jq --arg model "$model" --arg cache "$cache_key" '.model = $model | .stream = false | .prompt_cache_key = $cache' "$request" | tee "$workdir/request.json" | wc -c
-"$bin" --key "$key" --listen "$listen" --debug "$workdir/proxy.jsonl" "$auth" &
+"$bin" --key "$key" --listen "$listen" --codexpass-debug "$workdir/proxy.jsonl" "$auth" &
 proxy_pid=$!
 
 ready=false

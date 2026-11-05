@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -26,16 +28,30 @@ type RequestLogs struct {
 	Entries []LogEntry
 }
 
-// Logs filters by start time, sorts, then applies limit (zero means no limit).
-// The default order is newest first; ascending selects oldest first. Request IDs
+// Logs filters by start time and any supplied models before sorting and limiting
+// the results. Zero means no limit. The default order is newest first. Request IDs
 // break start-time ties. Counts and entries cover the same selected requests.
-func (s *Store) Logs(timeRange TimeRange, ascending bool, limit int) (RequestLogs, error) {
+func (s *Store) Logs(timeRange TimeRange, ascending bool, limit int, models ...string) (RequestLogs, error) {
 	if limit < 0 {
 		return RequestLogs{}, fmt.Errorf("request log limit must not be negative")
 	}
 	where, arguments, err := requestLogWhere(timeRange)
 	if err != nil {
 		return RequestLogs{}, err
+	}
+	if len(models) > 0 {
+		condition := "model IN (" + strings.Repeat("?, ", len(models)-1) + "?)"
+		if slices.Contains(models, "(unknown)") {
+			condition = "(" + condition + " OR model IS NULL)"
+		}
+		if where == "" {
+			where = " WHERE " + condition
+		} else {
+			where += " AND " + condition
+		}
+		for _, model := range models {
+			arguments = append(arguments, model)
+		}
 	}
 	direction := "DESC"
 	if ascending {

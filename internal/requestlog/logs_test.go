@@ -94,6 +94,7 @@ func TestLogsFiltersOrdersAndPreservesUsage(t *testing.T) {
 		timeRange TimeRange
 		ascending bool
 		limit     int
+		models    []string
 		wantIDs   []string
 		wantTotal Aggregate
 	}{
@@ -120,9 +121,21 @@ func TestLogsFiltersOrdersAndPreservesUsage(t *testing.T) {
 		{
 			name: "empty range with limit", timeRange: TimeRange{Start: end.Add(time.Millisecond), End: end.Add(time.Second)}, limit: 2,
 		},
+		{
+			name: "models and time range before limit", timeRange: TimeRange{Start: start, End: end}, limit: 2,
+			models: []string{"actual-model", "model-b"}, wantIDs: []string{"tie-z", "tie-a"},
+			wantTotal: Aggregate{Requests: 2, Canceled: 1, Failures: 1},
+		},
+		{
+			name: "unknown model", timeRange: TimeRange{All: true}, models: []string{"(unknown)"},
+			wantIDs: []string{"new"}, wantTotal: Aggregate{Requests: 1, InProgress: 1},
+		},
+		{
+			name: "exact stored name required", timeRange: TimeRange{All: true}, models: []string{"Actual-model", "requested-model", "model"},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			logs, err := store.Logs(test.timeRange, test.ascending, test.limit)
+			logs, err := store.Logs(test.timeRange, test.ascending, test.limit, test.models...)
 			if err != nil {
 				t.Fatal(err)
 			}

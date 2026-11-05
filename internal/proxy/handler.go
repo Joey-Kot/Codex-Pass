@@ -411,9 +411,13 @@ func (s *Server) retryUpstreamUnauthorized(ctx context.Context, credential *auth
 	}
 	firstBody, _ := io.ReadAll(io.LimitReader(first.Body, maxErrorBody+1))
 	first.Body.Close()
-	s.log(requestID, "ERROR", map[string]any{"operation": "upstream returned 401; forcing one OAuth refresh"})
-	if err := s.authPool.Refresh(ctx, credential); err != nil {
-		s.log(requestID, "ERROR", map[string]any{"operation": "forced token refresh", "error": debuglog.Error(err)})
+	var rejectedToken string
+	if first.Request != nil {
+		rejectedToken = strings.TrimPrefix(first.Request.Header.Get("Authorization"), "Bearer ")
+	}
+	s.log(requestID, "ERROR", map[string]any{"operation": "upstream returned 401; checking the stored credential"})
+	if err := s.authPool.Refresh(ctx, credential, rejectedToken); err != nil {
+		s.log(requestID, "ERROR", map[string]any{"operation": "token refresh after upstream 401", "error": debuglog.Error(err)})
 		if int64(len(firstBody)) <= maxErrorBody {
 			return &http.Response{StatusCode: http.StatusUnauthorized, Header: firstHeaders, Body: io.NopCloser(bytes.NewReader(firstBody))}
 		}
@@ -473,7 +477,11 @@ func (s *Server) sendUpstreamAccept(ctx context.Context, method, target string, 
 			"body_encoding": clientHeaders.Get("Content-Encoding"), "body_bytes": len(body),
 		})
 	}
-	return s.httpClient.Do(request)
+	response, err := s.httpClient.Do(request)
+	if response != nil && response.Request == nil {
+		response.Request = request
+	}
+	return response, err
 }
 
 func (s *Server) forwardStream(writer http.ResponseWriter, body io.Reader, headers http.Header, status int, requestID string) (time.Time, json.RawMessage, string, error) {

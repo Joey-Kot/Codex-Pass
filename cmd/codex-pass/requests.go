@@ -31,7 +31,7 @@ func runRequestLogs(options commonOptions, request requestOptions, output, error
 			fmt.Fprintln(errorOutput, "request log error:", closeErr)
 		}
 	}()
-	logs, err := store.Logs(timeRange, request.ascending, request.num)
+	logs, err := store.Logs(timeRange, request.ascending, request.num, request.models...)
 	if err != nil {
 		fmt.Fprintln(errorOutput, "error:", err)
 		return 1
@@ -46,6 +46,9 @@ func printRequestLogs(output io.Writer, options commonOptions, request requestOp
 		timeRangeValue = "all"
 	}
 	fmt.Fprintf(output, "Request History (Range: %s", timeRangeValue)
+	if len(request.models) > 0 {
+		fmt.Fprintf(output, ", Models: %s", strings.Join(request.models, ", "))
+	}
 	if request.num > 0 {
 		fmt.Fprintf(output, ", Limit: %d", request.num)
 	}

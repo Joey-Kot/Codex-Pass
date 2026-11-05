@@ -22,12 +22,12 @@ Codex-Pass is a local proxy for ChatGPT-backed Codex models. It uses your existi
 Copy a Codex authentication file to a dedicated location, then start the proxy:
 
 ```bash
-./codex-pass --key sk-local-secret --log ./usage /path/to/copied-auth.json
+./codex-pass --key sk-local-secret --codexpass-sqlite ./usage /path/to/copied-auth.json
 ```
 
 The default listen address is `127.0.0.1:8317`. On Windows, use `codex-pass.exe` with the same arguments. All proxy options must appear before the authentication file paths; multiple files are supported.
 
-`--key` and at least one authentication file are required. Official Codex files and supported CPA flattened files are accepted. The proxy refreshes upstream credentials and writes them back to the supplied files, so the files and their parent directories must be writable. Use dedicated copies rather than sharing a file with another process that refreshes it.
+`--key` and at least one authentication file are required. Pass file paths as arguments or set `CODEXPASS_AUTH_FILE`. Official Codex files and supported CPA flattened files are accepted. Use a writable copy of each auth file and share its path across Codex-Pass commands. Codex-Pass coordinates refreshes through a sibling lock file with the `.codex-pass.lock` suffix and atomically writes refreshed tokens to the resolved auth file, so its parent directory must be writable.
 
 ### Choose a client route
 
@@ -79,7 +79,7 @@ Merge the feature setting into an existing `[features]` table if present. Explic
 Add `--codex` to the proxy's startup command to enable the dedicated route alongside `/v1`:
 
 ```bash
-./codex-pass --key sk-local-secret --codex --log ./usage /path/to/copied-auth.json
+./codex-pass --key sk-local-secret --codex --codexpass-sqlite ./usage /path/to/copied-auth.json
 ```
 
 Keep Codex signed in with ChatGPT. Set these top-level values before the first TOML table in the user-level `~/.codex/config.toml`:
@@ -112,9 +112,12 @@ Tool requests use the same upstream authentication files, refresh/retry behavior
 ### Commands and options
 
 ```text
-codex-pass [options] --key KEY [--codex] AUTH_FILE [AUTH_FILE ...]
-codex-pass sum --log DIR [report options]
-codex-pass req --log DIR [report options] [--asc | --desc] [--num N]
+codex-pass [options] --key KEY [--codex] [AUTH_FILE ...]
+codex-pass sum [--codexpass-sqlite DIR] [report options]
+codex-pass req [--codexpass-sqlite DIR] [report options] [--asc | --desc] [--num N] [--models MODEL[,MODEL...]]
+codex-pass quota [AUTH_FILE ...]
+codex-pass reset [N] [AUTH_FILE ...]
+codex-pass models [--client-version VERSION] [AUTH_FILE ...]
 ```
 
 | Option | Scope | Description |
@@ -122,27 +125,45 @@ codex-pass req --log DIR [report options] [--asc | --desc] [--num N]
 | `--key KEY` | Proxy | Required Bearer Key for `/v1`; remains required when `--codex` is enabled. |
 | `--listen ADDRESS` | Proxy | Listen address; overrides `CODEX_PROXY_LISTEN`. Defaults to `127.0.0.1:8317`. |
 | `--codex` | Proxy | Enable Codex-specific inference, model catalog, search, and image routes. Disabled by default. |
-| `--debug FILE` | Proxy | Write detailed JSON Lines debug logs with credential redaction. |
-| `--log DIR` | Proxy and reports | Store or query `DIR/codex-pass.sqlite`. Required by `sum` and `req`. |
+| `--codexpass-debug FILE` | Proxy | Write redacted JSON Lines debug logs to `FILE`. Defaults to `CODEXPASS_DEBUG`. |
+| `--codexpass-sqlite DIR` | Proxy and reports | Write or query `DIR/codex-pass.sqlite`. Defaults to `CODEXPASS_SQLITE`. `sum` and `req` require a directory from either source. |
 | `--time RANGE` | Reports | Filter by request start time. Defaults to all recorded requests. |
 | `--human` | Reports | Format counts and tokens with compact K/M/B units. |
 | `--price FILE` | Reports | Estimate costs using a JSON price table. See [prices.example.json](prices.example.json). |
 | `--asc` / `--desc` | `req` | Sort oldest or newest first. Default: newest first. Mutually exclusive. |
 | `--num N` | `req` | Limit the report to a positive number of requests after filtering and sorting. |
+| `--models MODEL[,MODEL...]` | `req` | Filter by one or more exact stored model names before sorting and applying `--num`. |
 | `--help` | Any command | Show command-specific help. |
 
-Common options (`--log`, `--time`, `--human`, and `--price`) can appear before or after `sum` or `req`. Request-specific options belong after `req`. Report commands do not start the proxy or require credentials.
+Use the `--option` form for all options. Command-line paths override their environment variables. Common options (`--codexpass-sqlite`, `--time`, `--human`, and `--price`) can appear before or after `sum` or `req`. Request-specific options belong after `req`. Report commands do not start the proxy or require credentials.
 
 ```bash
-./codex-pass sum --log ./usage --time 1h --human
-./codex-pass req --log ./usage --time 1d --num 20
-./codex-pass req --log ./usage --asc --num 10 --price ./prices.example.json
+./codex-pass sum --codexpass-sqlite ./usage --time 1h --human
+./codex-pass req --codexpass-sqlite ./usage --time 1d --num 20
+./codex-pass req --codexpass-sqlite ./usage --asc --num 10 --price ./prices.example.json
+CODEXPASS_SQLITE=./usage ./codex-pass req --models gpt-6-astra,gpt-6-luna --num 20
 ./codex-pass req --help
 ```
 
 Time ranges accept durations such as `2m`, `1h`, `2d`, `1w`, `3M`, and `1y`, or inclusive local date ranges such as `2026-10-01,2026-10-28`. Use `YYYY-MM-DD-HH-MM,YYYY-MM-DD-HH-MM` for minute precision. Lowercase `m` means minutes; uppercase `M` means calendar months.
 
-Usage reports include request outcomes, model names, reasoning effort, and token counts returned by the upstream. Missing usage remains unknown. SQLite stores metadata rather than prompts or credentials; detailed debug logs include request and response content.
+Usage reports include request outcomes, model names, reasoning effort, and token counts returned by the upstream. `req` uses the filtered requests for both tables and the price total. Missing usage remains unknown. SQLite stores metadata rather than prompts or credentials; detailed debug logs include request and response content.
+
+### Account quota, resets, and models
+
+Pass one or more Codex or CPA authentication files on the command line, or set `CODEXPASS_AUTH_FILE` to supply the default paths for account commands and proxy startup. Use `:` between paths on Linux and macOS and `;` on Windows. Explicit paths replace the environment list for that invocation. Repeated references to the same file are counted once, at the position of the first supplied path. Account commands contact ChatGPT directly using the proxy's token refresh behavior.
+
+```bash
+export CODEXPASS_AUTH_FILE='/path/to/first.json:/path/with spaces/second.json'
+./codex-pass quota
+./codex-pass reset
+./codex-pass reset 2
+./codex-pass models /path/to/another.json /path/to/fourth.json
+```
+
+- `quota` groups results by auth file and shows the percentage used, percentage remaining, and next reset time for each weekly quota window.
+- `reset` shows the total available reset count and one table with the number, auth file name, and expiration time for each listed credit. Numbers start at `1` and follow the order of the supplied files, oldest grants first within each file. Numbering and redemption require complete credit details for every selected file. `reset N` fetches the current lists before showing the selected file and credit for `[y/N]` confirmation. Only `y` or `Y` redeems that credit. Enter, unrecognized input, and closed stdin cancel the operation. Times use the machine's local timezone.
+- `models` groups results by auth file, with separate Codex and ChatGPT catalogs for each account. The Codex catalog includes hidden entries. Use `--client-version VERSION` to request a different Codex catalog version. The ChatGPT catalog shows which models advertise the image tool. The separate `gpt-image-2` entry documents the default model for Codex's built-in image tool. Access to that tool depends on the account's plan and workspace. [OpenAI image generation documentation](https://learn.chatgpt.com/docs/image-generation)
 
 ### Build from source
 

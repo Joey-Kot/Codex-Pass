@@ -5,10 +5,9 @@ import (
 	"net/url"
 	"strings"
 
+	"codex-pass/internal/codexapi"
 	debuglog "codex-pass/internal/debug"
 )
-
-const defaultModelsClientVersion = "0.166.0"
 
 // handleModels forwards the complete Codex model catalog without converting it
 // to the public OpenAI model-list format or caching account-specific metadata.
@@ -63,7 +62,7 @@ func (s *Server) handleModels(writer http.ResponseWriter, request *http.Request)
 
 // modelsQuery supplies a fallback without re-encoding other query parameters.
 func modelsQuery(rawQuery string) string {
-	const defaultParameter = "client_version=" + defaultModelsClientVersion
+	const defaultParameter = "client_version=" + codexapi.ModelsClientVersion
 	if rawQuery == "" {
 		return defaultParameter
 	}
@@ -77,7 +76,7 @@ func modelsQuery(rawQuery string) string {
 		}
 		found = true
 		if value == "" {
-			fields[index] = key + "=" + defaultModelsClientVersion
+			fields[index] = key + "=" + codexapi.ModelsClientVersion
 		}
 	}
 	if !found {

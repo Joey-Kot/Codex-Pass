@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,6 +57,33 @@ func TestLoadRejectsUnknownOrIncompleteFormats(t *testing.T) {
 	}
 }
 
+func TestLoadAllDeduplicatesFilesInInputOrder(t *testing.T) {
+	directory := t.TempDir()
+	first := filepath.Join(directory, "first.json")
+	second := filepath.Join(directory, "second.json")
+	contents := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","account_id":"acct"}}`)
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := []string{first, first}
+	if hardlink := filepath.Join(directory, "hardlink.json"); os.Link(first, hardlink) == nil {
+		paths = append(paths, hardlink)
+	}
+	if symlink := filepath.Join(directory, "symlink.json"); os.Symlink(first, symlink) == nil {
+		paths = append([]string{symlink}, paths...)
+	}
+	paths = append(paths, second)
+	credentials, err := LoadAll(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 2 || credentials[0].Path() != paths[0] || credentials[1].Path() != second {
+		t.Fatalf("loaded %d credentials, want the first path and the distinct copy", len(credentials))
+	}
+}
+
 func TestRefreshIsCoalescedAndPreservesUnknownFields(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "auth.json")
@@ -64,9 +92,13 @@ func TestRefreshIsCoalescedAndPreservesUnknownFields(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	credential, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	var credentials [2]*Credential
+	for index := range credentials {
+		credential, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		credentials[index] = credential
 	}
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -84,7 +116,8 @@ func TestRefreshIsCoalescedAndPreservesUnknownFields(t *testing.T) {
 	defer server.Close()
 	config := RefreshConfig{Endpoint: server.URL, Client: server.Client()}
 	var group sync.WaitGroup
-	for range 32 {
+	for index := range 32 {
+		credential := credentials[index%len(credentials)]
 		group.Add(1)
 		go func() {
 			defer group.Done()
@@ -97,8 +130,10 @@ func TestRefreshIsCoalescedAndPreservesUnknownFields(t *testing.T) {
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
 	}
-	if got := credential.Snapshot().Token; got != "new-access" {
-		t.Fatalf("access token = %q", got)
+	for _, credential := range credentials {
+		if got := credential.Snapshot().Token; got != "new-access" {
+			t.Fatalf("access token = %q", got)
+		}
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -117,6 +152,49 @@ func TestRefreshIsCoalescedAndPreservesUnknownFields(t *testing.T) {
 	}
 	if value["unknown_top"].(map[string]any)["keep"] != true || value["tokens"].(map[string]any)["unknown"] != "kept" {
 		t.Fatalf("unknown fields were not preserved: %s", stored)
+	}
+}
+
+func TestAuthRefreshLockWaitRespectsCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json.codex-pass.lock")
+	release, err := lockAuthFile(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	secondRelease, err := lockAuthFile(ctx, path)
+	if err == nil {
+		secondRelease()
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second lock attempt returned %v, want deadline exceeded", err)
+	}
+}
+
+func TestRefreshedFlattenedFileKeepsAliasesReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	contents := []byte(`{"type":"codex","access_token":"old-access","accessToken":"old-access","refresh_token":"old-refresh","refreshToken":"old-refresh","account_id":"acct"}`)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh"}`))
+	}))
+	defer server.Close()
+	config := RefreshConfig{Endpoint: server.URL, Client: server.Client()}
+	if err := credential.Refresh(t.Context(), config, "old-access"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := Load(path)
+	if err != nil || updated.accessToken != "new-access" || updated.refreshToken != "new-refresh" {
+		t.Fatalf("could not reload rotated token aliases: %v", err)
 	}
 }
 

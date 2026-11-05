@@ -35,7 +35,7 @@ func (c RefreshConfig) normalized() RefreshConfig {
 	return c
 }
 
-// EnsureFresh performs proactive refresh, coalesced by the credential mutex.
+// EnsureFresh checks the cached credential before consulting the file on refresh.
 func (c *Credential) EnsureFresh(ctx context.Context, config RefreshConfig) error {
 	config = config.normalized()
 	c.mu.Lock()
@@ -43,15 +43,44 @@ func (c *Credential) EnsureFresh(ctx context.Context, config RefreshConfig) erro
 	if !c.needsRefresh(config.Now()) {
 		return nil
 	}
-	return c.refreshLocked(ctx, config)
+	return c.refreshFromFile(ctx, config, "")
 }
 
-// Refresh forces one refresh. It is used for a 401 before any client bytes are written.
-func (c *Credential) Refresh(ctx context.Context, config RefreshConfig) error {
+// Refresh handles a 401, reusing a fresh token if the rejected token was replaced.
+func (c *Credential) Refresh(ctx context.Context, config RefreshConfig, rejectedToken string) error {
 	config = config.normalized()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.refreshLocked(ctx, config)
+	if rejectedToken == "" {
+		rejectedToken = c.accessToken
+	}
+	return c.refreshFromFile(ctx, config, rejectedToken)
+}
+
+// refreshFromFile holds the credential mutex and locks the file across processes.
+func (c *Credential) refreshFromFile(ctx context.Context, config RefreshConfig, rejectedToken string) error {
+	release, err := lockAuthFile(ctx, c.resolvedPath+".codex-pass.lock")
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	latest, err := loadResolvedCredential(c.path, c.resolvedPath)
+	if err != nil {
+		return err
+	}
+	if latest.accountID != c.accountID {
+		return fmt.Errorf("account_id changed in auth file %q", c.path)
+	}
+	if latest.needsRefresh(config.Now()) || latest.accessToken == rejectedToken {
+		if err := latest.refreshLocked(ctx, config); err != nil {
+			return err
+		}
+	}
+	c.format, c.root = latest.format, latest.root
+	c.accessToken, c.refreshToken = latest.accessToken, latest.refreshToken
+	c.lastRefresh = latest.lastRefresh
+	return nil
 }
 
 type refreshResponse struct {
