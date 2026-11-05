@@ -53,6 +53,8 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 The proxy also exposes `POST /v1/responses` with streaming and non-streaming output. `GET /v1/models` returns the full Codex model catalog, including capabilities and instructions; it is not the public OpenAI model-list format.
 
+Model catalog requests default a missing or empty `client_version` to `0.166.0`. Explicit versions and other query parameters retain their original encoding, order, and repeated values. This also applies to `/codex/models` when enabled.
+
 For a Codex custom provider, add the following to the user-level `~/.codex/config.toml` and make `CODEX_PASS_KEY` available to the Codex process:
 
 ```toml

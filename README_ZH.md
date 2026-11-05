@@ -53,6 +53,8 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 代理也提供 `POST /v1/responses`，支持流式和非流式输出。`GET /v1/models` 返回包含模型能力和指令的完整 Codex 模型目录，不是公开 OpenAI API 中仅列出模型信息的列表格式。
 
+模型目录请求未提供 `client_version` 或其值为空时，代理自动补为 `0.166.0`；显式传入的版本号和其他查询参数保留原始编码、顺序及重复值。启用后的 `/codex/models` 同样适用。
+
 在 Codex 中使用自定义 Provider 时，将以下配置加入用户级 `~/.codex/config.toml`，并确保 Codex 进程可以读取环境变量 `CODEX_PASS_KEY`：
 
 ```toml

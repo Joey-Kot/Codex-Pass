@@ -218,7 +218,7 @@ CODEX_PASS_TEST_CODEX_BIN=/path/to/codex go test ./internal/proxy -run 'TestCode
 
 ## Codex 模型目录
 
-`GET /v1/models` 使用同一个本地 API Key 认证，代理用配置的 Auth File 请求 `https://chatgpt.com/backend-api/codex/models`。客户端的 `client_version` 等查询参数会原样传递；返回的完整 Codex 模型目录、HTTP 状态码、ETag 和缓存控制头直接转发，不转换为只有模型 ID 的 OpenAI 模型列表，也不在代理内缓存或合并多个账号的目录。账号按 `session-id` 稳定选择，没有该头时使用第一个 Auth File。此接口支持自动刷新令牌和一次 401 重试，不计入 SQLite 推理用量日志。
+`GET /v1/models` 使用同一个本地 API Key 认证，代理用配置的 Auth File 请求 `https://chatgpt.com/backend-api/codex/models`。未提供 `client_version` 或其值为空时，自动补为 `0.166.0`；显式传入的版本号和其他查询参数保留原始编码、顺序及重复值，启用后的 `/codex/models` 同样适用。返回的完整 Codex 模型目录、HTTP 状态码、ETag 和缓存控制头直接转发，不转换为只有模型 ID 的 OpenAI 模型列表，也不在代理内缓存或合并多个账号的目录。账号按 `session-id` 稳定选择，没有该头时使用第一个 Auth File。此接口支持自动刷新令牌和一次 401 重试，不计入 SQLite 推理用量日志。
 
 ```bash
 curl 'http://127.0.0.1:8317/v1/models?client_version=0.164.0' \

@@ -3,9 +3,12 @@ package proxy
 import (
 	"net/http"
 	"net/url"
+	"strings"
 
 	debuglog "codex-pass/internal/debug"
 )
+
+const defaultModelsClientVersion = "0.166.0"
 
 // handleModels forwards the complete Codex model catalog without converting it
 // to the public OpenAI model-list format or caching account-specific metadata.
@@ -16,7 +19,7 @@ func (s *Server) handleModels(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadGateway, "invalid models upstream URL")
 		return
 	}
-	target.RawQuery = request.URL.RawQuery
+	target.RawQuery = modelsQuery(request.URL.RawQuery)
 	sessionID := request.Header.Get("session-id")
 	accountIndex, credential := s.authPool.Select("", sessionID)
 	if s.logger != nil {
@@ -56,4 +59,29 @@ func (s *Server) handleModels(writer http.ResponseWriter, request *http.Request)
 	}
 	s.copyUpstreamResponse(writer, upstream)
 	s.log(requestID, "CLIENT_RESPONSE", map[string]any{"status": upstream.StatusCode, "mode": "models"})
+}
+
+// modelsQuery supplies a fallback without re-encoding other query parameters.
+func modelsQuery(rawQuery string) string {
+	const defaultParameter = "client_version=" + defaultModelsClientVersion
+	if rawQuery == "" {
+		return defaultParameter
+	}
+	fields := strings.Split(rawQuery, "&")
+	found := false
+	for index, field := range fields {
+		key, value, _ := strings.Cut(field, "=")
+		name, err := url.QueryUnescape(key)
+		if err != nil || name != "client_version" {
+			continue
+		}
+		found = true
+		if value == "" {
+			fields[index] = key + "=" + defaultModelsClientVersion
+		}
+	}
+	if !found {
+		fields = append(fields, defaultParameter)
+	}
+	return strings.Join(fields, "&")
 }

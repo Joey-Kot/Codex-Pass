@@ -18,6 +18,51 @@ import (
 	"time"
 )
 
+func TestModelsClientVersionDefaultAndQueryPreservation(t *testing.T) {
+	for _, endpoint := range []string{"/v1/models", "/codex/models"} {
+		t.Run(endpoint, func(t *testing.T) {
+			for _, test := range []struct {
+				name, query, wantQuery string
+			}{
+				{"no query", "", "client_version=0.166.0"},
+				{"missing version", "scope=a%2fb&scope=c&filter=hello%20world&flag&empty=", "scope=a%2fb&scope=c&filter=hello%20world&flag&empty=&client_version=0.166.0"},
+				{"empty version", "scope=a%2Fb&client_version=&scope=c", "scope=a%2Fb&client_version=0.166.0&scope=c"},
+				{"bare version", "client_version&scope=a%2fb", "client_version=0.166.0&scope=a%2fb"},
+				{"explicit version", "scope=a%2fb&client_version=0.160.0&filter=hello%20world&scope=c", "scope=a%2fb&client_version=0.160.0&filter=hello%20world&scope=c"},
+				{"encoded empty version key", "client%5Fversion=&scope=a%2fb", "client%5Fversion=0.166.0&scope=a%2fb"},
+				{"encoded version", "client%5Fversion=0%2e160%2e0&scope=a%2fb", "client%5Fversion=0%2e160%2e0&scope=a%2fb"},
+				{"repeated versions", "client_version=0.160.0&scope=a%2fb&client_version=0.164.0", "client_version=0.160.0&scope=a%2fb&client_version=0.164.0"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+						if request.URL.Path != "/models" || request.URL.RawQuery != test.wantQuery {
+							t.Errorf("upstream URL = %s, want /models?%s", request.URL, test.wantQuery)
+						}
+						writer.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(writer, `{"models":[]}`)
+					}))
+					defer upstream.Close()
+					proxyServer, cleanup := newTestProxyConfigured(t, upstream, upstream.URL+"/refresh", "", enableCodex)
+					defer cleanup()
+					request, err := http.NewRequest(http.MethodGet, proxyServer.URL+endpoint+"?"+test.query, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					request.Header.Set("Authorization", "Bearer sk-local-secret")
+					response, err := proxyServer.Client().Do(request)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer response.Body.Close()
+					if response.StatusCode != http.StatusOK {
+						t.Fatalf("status = %d", response.StatusCode)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestModelsCatalogPreservesMetadataQueryAndHeaders(t *testing.T) {
 	const query = "client_version=0.164.0&scope=a%2Fb&scope=c"
 	const catalog = "{\n  \"models\": [{\"slug\":\"gpt-6.1-terra\",\"visibility\":\"list\",\"model_instructions\":{\"base_instructions\":\"keep these\"},\"context_window\":1048576,\"future_field\":{\"preserve\":true}}]\n}\n"
@@ -200,7 +245,7 @@ func TestModelsRefreshesOnceAndRetriesTheSameGET(t *testing.T) {
 					_, _ = io.WriteString(writer, `{"access_token":"rotated-access","refresh_token":"rotated-refresh"}`)
 				case "/models":
 					call := calls.Add(1)
-					if request.Method != http.MethodGet || request.URL.RawQuery != "client_version=0.164.0" || request.Header.Get("Accept") != "application/json" {
+					if request.Method != http.MethodGet || request.URL.RawQuery != "client_version=0.166.0" || request.Header.Get("Accept") != "application/json" {
 						t.Errorf("catalog retry changed: %s %s headers=%v", request.Method, request.URL, request.Header)
 					}
 					wantToken := "Bearer test-access"
@@ -416,7 +461,7 @@ model_catalog_url = %q
 
 func getModels(t *testing.T, proxyServer *httptest.Server) *http.Response {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/v1/models?client_version=0.164.0", nil)
+	request, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/v1/models", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
