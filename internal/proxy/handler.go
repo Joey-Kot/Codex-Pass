@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,7 @@ const (
 )
 
 type Config struct {
-	APIKey            string
+	APIKeys           []string
 	EnableCodex       bool
 	AuthPool          *auth.Pool
 	HTTPClient        *http.Client
@@ -44,7 +45,7 @@ type Config struct {
 }
 
 type Server struct {
-	apiKey            string
+	apiKeyHashes      [][sha256.Size]byte
 	enableCodex       bool
 	authPool          *auth.Pool
 	httpClient        *http.Client
@@ -60,8 +61,16 @@ type Server struct {
 }
 
 func New(config Config) (*Server, error) {
-	if strings.TrimSpace(config.APIKey) == "" {
-		return nil, errors.New("proxy API key is empty")
+	if len(config.APIKeys) == 0 {
+		return nil, errors.New("proxy requires at least one API key")
+	}
+	apiKeyHashes := make([][sha256.Size]byte, len(config.APIKeys))
+	for index, key := range config.APIKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return nil, errors.New("proxy API keys must be non-empty")
+		}
+		apiKeyHashes[index] = sha256.Sum256([]byte(key))
 	}
 	if config.AuthPool == nil {
 		return nil, errors.New("auth pool is required")
@@ -88,7 +97,7 @@ func New(config Config) (*Server, error) {
 		config.UserAgent = "codex-pass/0.1"
 	}
 	return &Server{
-		apiKey: config.APIKey, authPool: config.AuthPool, httpClient: config.HTTPClient,
+		apiKeyHashes: apiKeyHashes, authPool: config.AuthPool, httpClient: config.HTTPClient,
 		enableCodex: config.EnableCodex,
 		upstreamURL: config.UpstreamURL, modelsUpstreamURL: config.ModelsUpstreamURL,
 		codexUpstreamURL: config.CodexUpstreamURL,
@@ -118,7 +127,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"status":"ok"}\n`))
+		_, _ = io.WriteString(writer, "{\"status\":\"ok\"}\n")
 		return
 	case "/v1/models", "/codex/models":
 		if request.Method != http.MethodGet {
@@ -183,7 +192,12 @@ func (s *Server) authorized(header string) bool {
 	if !found || !strings.EqualFold(scheme, "Bearer") || token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) == 1
+	digest := sha256.Sum256([]byte(token))
+	match := 0
+	for _, keyHash := range s.apiKeyHashes {
+		match |= subtle.ConstantTimeCompare(digest[:], keyHash[:])
+	}
+	return match == 1
 }
 
 func (s *Server) handleResponsesMode(writer http.ResponseWriter, request *http.Request, codex bool) {

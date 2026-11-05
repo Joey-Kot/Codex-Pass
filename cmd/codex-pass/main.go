@@ -72,6 +72,13 @@ func runProxy(common commonOptions, options proxyOptions, authFiles []string) in
 			}
 		}()
 	}
+	config := proxy.Config{
+		APIKeys:     options.apiKeys,
+		EnableCodex: options.codex,
+		AuthPool:    pool,
+		HTTPClient:  httpClient,
+		Logger:      logger,
+	}
 	var usageLog *requestlog.Store
 	if strings.TrimSpace(common.logDirectory) != "" {
 		usageLog, err = requestlog.Open(common.logDirectory)
@@ -79,16 +86,14 @@ func runProxy(common commonOptions, options proxyOptions, authFiles []string) in
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 2
 		}
+		config.RequestLog = usageLog
 		defer func() {
 			if closeErr := usageLog.Close(); closeErr != nil {
 				fmt.Fprintln(os.Stderr, "request log error:", closeErr)
 			}
 		}()
 	}
-	handler, err := proxy.New(proxy.Config{
-		APIKey: options.apiKey, AuthPool: pool, HTTPClient: httpClient, Logger: logger, RequestLog: usageLog,
-		EnableCodex: options.codex,
-	})
+	handler, err := proxy.New(config)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 2
@@ -107,7 +112,7 @@ func runProxy(common commonOptions, options proxyOptions, authFiles []string) in
 	}
 	log.Printf("codex-pass listening on http://%s with %d auth file(s)", listenAddress, len(credentials))
 	if options.codex {
-		log.Printf("Codex entry enabled at /codex (no local API key check); /v1 still requires --key")
+		log.Printf("Codex entry enabled at /codex (no local API key check). /v1 requires a configured Bearer key.")
 	}
 	if logger != nil {
 		log.Printf("detailed debug logging enabled at %s", options.debugPath)

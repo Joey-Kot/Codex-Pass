@@ -16,6 +16,7 @@ import (
 const (
 	sqliteFlag  = "codexpass-sqlite"
 	debugFlag   = "codexpass-debug"
+	keyEnv      = "CODEXPASS_KEY"
 	sqliteEnv   = "CODEXPASS_SQLITE"
 	debugEnv    = "CODEXPASS_DEBUG"
 	authFileEnv = "CODEXPASS_AUTH_FILE"
@@ -29,7 +30,7 @@ type commonOptions struct {
 }
 
 type proxyOptions struct {
-	apiKey    string
+	apiKeys   []string
 	debugPath string
 	listen    string
 	codex     bool
@@ -68,7 +69,8 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	commonFlags := flag.NewFlagSet("common", flag.ContinueOnError)
 	registerCommonFlags(commonFlags, &options.common)
 	proxyFlags := flag.NewFlagSet("proxy", flag.ContinueOnError)
-	proxyFlags.StringVar(&options.proxy.apiKey, "key", "", "required client Bearer `KEY`")
+	var keyList string
+	proxyFlags.StringVar(&keyList, "key", "", "local Bearer `KEY[,KEY...]` (defaults to "+keyEnv+")")
 	proxyFlags.StringVar(&options.proxy.debugPath, debugFlag, "", "JSON Lines debug log `FILE` (defaults to "+debugEnv+")")
 	proxyFlags.StringVar(&options.proxy.listen, "listen", "", "listen `ADDRESS` (overrides CODEX_PROXY_LISTEN)")
 	proxyFlags.BoolVar(&options.proxy.codex, "codex", false, "enable /codex for Codex with ChatGPT login (no local API key check; raw request bodies)")
@@ -82,7 +84,7 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	}
 	flags.Usage = func() {
 		fmt.Fprintln(output, "Usage: codex-pass [common options] <command> [command arguments]")
-		fmt.Fprintln(output, "       codex-pass [common options] --key API_KEY [--codex] [--listen ADDRESS] [--codexpass-debug FILE] [AUTH_FILE ...]")
+		fmt.Fprintln(output, "       codex-pass [common options] [--key KEY[,KEY...]] [--codex] [--listen ADDRESS] [--codexpass-debug FILE] [AUTH_FILE ...]")
 		fmt.Fprintln(output, "\nTransparent Codex Responses API proxy listening on 127.0.0.1:8317 by default.")
 		fmt.Fprintln(output, "\nCommands:")
 		fmt.Fprintln(output, "  sum  Print SQLite request usage summary")
@@ -111,12 +113,18 @@ func parseCommandLine(arguments []string, output io.Writer) (commandLine, error)
 	command := options.command
 	if command == "" {
 		options.authFiles = resolveAuthFiles(operands)
-		if strings.TrimSpace(options.proxy.apiKey) == "" {
-			err := fmt.Errorf("--key is required")
-			fmt.Fprintln(output, "error:", err)
-			flags.Usage()
-			return options, err
+		if !hasFlag(flags, "key") {
+			keyList = os.Getenv(keyEnv)
 		}
+		keys := strings.Split(keyList, ",")
+		for index, key := range keys {
+			keys[index] = strings.TrimSpace(key)
+			if keys[index] == "" {
+				err := fmt.Errorf("provide one or more comma-separated, non-empty API keys with --key or %s", keyEnv)
+				return options, printOptionError(flags, err)
+			}
+		}
+		options.proxy.apiKeys = keys
 		if len(options.authFiles) == 0 {
 			err := fmt.Errorf("at least one Codex auth file is required (pass paths or set %s)", authFileEnv)
 			fmt.Fprintln(output, "error:", err)

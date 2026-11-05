@@ -58,7 +58,7 @@ func TestSumCommonOptions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseCommandLine(%q): %v\n%s", test.arguments, err, output.String())
 			}
-			if got.command != "sum" || got.common != test.want || got.proxy != (proxyOptions{}) || len(got.authFiles) != 0 {
+			if got.command != "sum" || got.common != test.want || !reflect.DeepEqual(got.proxy, proxyOptions{}) || len(got.authFiles) != 0 {
 				t.Fatalf("parsed options = %#v, want sum with %#v", got, test.want)
 			}
 		})
@@ -78,7 +78,7 @@ func TestProxyCommandLine(t *testing.T) {
 			arguments: []string{"--key", "test-key", "--codexpass-sqlite", "usage", "--time", "1h", "--human", "--codexpass-debug", "proxy.jsonl", "--listen", "127.0.0.1:9000", "auth.json", "second.json"},
 			want: commandLine{
 				common:    commonOptions{logDirectory: "usage", timeRange: "1h", humanReadable: true},
-				proxy:     proxyOptions{apiKey: "test-key", debugPath: "proxy.jsonl", listen: "127.0.0.1:9000"},
+				proxy:     proxyOptions{apiKeys: []string{"test-key"}, debugPath: "proxy.jsonl", listen: "127.0.0.1:9000"},
 				authFiles: []string{"auth.json", "second.json"},
 			},
 		},
@@ -86,7 +86,7 @@ func TestProxyCommandLine(t *testing.T) {
 			name:      "Codex entry alongside keyed API",
 			arguments: []string{"--codex", "--key", "test-key", "auth.json"},
 			want: commandLine{
-				proxy:     proxyOptions{apiKey: "test-key", codex: true},
+				proxy:     proxyOptions{apiKeys: []string{"test-key"}, codex: true},
 				authFiles: []string{"auth.json"},
 			},
 		},
@@ -95,7 +95,7 @@ func TestProxyCommandLine(t *testing.T) {
 			arguments: []string{"--key", "sum", "--codexpass-sqlite", "sum", "auth.json"},
 			want: commandLine{
 				common:    commonOptions{logDirectory: "sum"},
-				proxy:     proxyOptions{apiKey: "sum"},
+				proxy:     proxyOptions{apiKeys: []string{"sum"}},
 				authFiles: []string{"auth.json"},
 			},
 		},
@@ -103,7 +103,7 @@ func TestProxyCommandLine(t *testing.T) {
 			name:      "command name after another auth file",
 			arguments: []string{"--key", "test-key", "auth.json", "sum"},
 			want: commandLine{
-				proxy:     proxyOptions{apiKey: "test-key"},
+				proxy:     proxyOptions{apiKeys: []string{"test-key"}},
 				authFiles: []string{"auth.json", "sum"},
 			},
 		},
@@ -111,7 +111,7 @@ func TestProxyCommandLine(t *testing.T) {
 			name:      "command name after terminator",
 			arguments: []string{"--key", "test-key", "--", "sum"},
 			want: commandLine{
-				proxy:     proxyOptions{apiKey: "test-key"},
+				proxy:     proxyOptions{apiKeys: []string{"test-key"}},
 				authFiles: []string{"sum"},
 			},
 		},
@@ -125,6 +125,38 @@ func TestProxyCommandLine(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("parsed options = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestProxyKeySources(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		env  string
+		args []string
+		want []string
+	}{
+		{name: "one environment key", env: "env-one", want: []string{"env-one"}},
+		{name: "environment list", env: " env-one, env-two ", want: []string{"env-one", "env-two"}},
+		{name: "command line overrides environment", env: "env-one,env-two", args: []string{"--key", "cli-one"}, want: []string{"cli-one"}},
+		{name: "command line list overrides invalid environment", env: ",", args: []string{"--key=cli-one,cli-two"}, want: []string{"cli-one", "cli-two"}},
+		{name: "explicit empty key", env: "env-one", args: []string{"--key="}},
+		{name: "empty environment list entry", env: "example-private-key,,env-two"},
+		{name: "empty command line list entry", env: "env-one", args: []string{"--key=example-private-key,"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CODEXPASS_KEY", test.env)
+			var output bytes.Buffer
+			options, err := parseCommandLine(append(test.args, "auth.json"), &output)
+			if test.want == nil {
+				if err == nil || !strings.Contains(output.String(), "non-empty API keys") || strings.Contains(output.String(), "example-private-key") {
+					t.Fatalf("invalid key list produced error %v and output %q", err, output.String())
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(options.proxy.apiKeys, test.want) {
+				t.Fatalf("parsed keys = %q, want %q, error = %v", options.proxy.apiKeys, test.want, err)
 			}
 		})
 	}
@@ -216,6 +248,7 @@ func TestPriceIsACommonOption(t *testing.T) {
 
 func TestCommandLineRejectsInvalidArguments(t *testing.T) {
 	t.Setenv("CODEXPASS_AUTH_FILE", "")
+	t.Setenv("CODEXPASS_KEY", "")
 	t.Setenv("AUTH_FILE", "legacy.json")
 	t.Setenv("CODEXPASS_SQLITE", "")
 	tests := []struct {
@@ -239,8 +272,8 @@ func TestCommandLineRejectsInvalidArguments(t *testing.T) {
 		{name: "missing flag value before sum", arguments: []string{"--time"}, wantError: "option --time requires a value"},
 		{name: "missing flag value after sum", arguments: []string{"sum", "--codexpass-sqlite"}, wantError: "option --codexpass-sqlite requires a value"},
 		{name: "invalid boolean", arguments: []string{"sum", "--human=maybe"}, wantError: "invalid value \"maybe\" for --human"},
-		{name: "missing proxy key", arguments: []string{"auth.json"}, wantError: "--key is required"},
-		{name: "Codex entry still requires proxy key", arguments: []string{"--codex", "auth.json"}, wantError: "--key is required"},
+		{name: "missing proxy key", arguments: []string{"auth.json"}, wantError: "--key or CODEXPASS_KEY"},
+		{name: "Codex entry still requires proxy key", arguments: []string{"--codex", "auth.json"}, wantError: "--key or CODEXPASS_KEY"},
 		{name: "Codex entry is proxy only", arguments: []string{"--codex", "sum", "--codexpass-sqlite", "usage"}, wantError: "--codex is only available in proxy mode"},
 		{name: "missing proxy auth file", arguments: []string{"--key", "test-key"}, wantError: "at least one Codex auth file is required"},
 		{name: "req missing log", arguments: []string{"req"}, wantError: "req requires --codexpass-sqlite DIR"},

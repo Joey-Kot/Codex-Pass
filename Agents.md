@@ -26,9 +26,9 @@ go build -o codex-pass ./cmd/codex-pass
   /path/to/copied-auth.json
 ```
 
-常规代理模式下，`--key` 必填，`--codexpass-debug`、`--codexpass-sqlite` 和 `--listen` 可选。认证文件可作为位置参数传入，也可设置 `CODEXPASS_AUTH_FILE`。SQLite 目录和调试日志路径分别默认读取 `CODEXPASS_SQLITE` 和 `CODEXPASS_DEBUG`。命令行指定的路径优先。`--listen` 优先于 `CODEX_PROXY_LISTEN`，两者都未设置时默认监听 `127.0.0.1:8317`。如果改成非回环地址，程序会发出 TLS、访问控制和日志保护提示。
+代理模式需要通过 `--key` 或 `CODEXPASS_KEY` 至少配置一个本地 API Key。两种方式均支持用逗号分隔多个 Key，显式传入 `--key` 时使用命令行指定的整组 Key。`--codexpass-debug`、`--codexpass-sqlite` 和 `--listen` 可选。认证文件可作为位置参数传入，也可设置 `CODEXPASS_AUTH_FILE`。SQLite 目录和调试日志路径分别默认读取 `CODEXPASS_SQLITE` 和 `CODEXPASS_DEBUG`。命令行指定的路径优先。`--listen` 优先于 `CODEX_PROXY_LISTEN`，两者都未设置时默认监听 `127.0.0.1:8317`。如果改成非回环地址，程序会发出 TLS、访问控制和日志保护提示。
 
-`--codex` 默认关闭。启用后 `/v1` 仍然校验 `--key`，另行开放 `/codex` 供 Codex 的内置 OpenAI Provider 使用；这个入口不校验本地 Key，也不验证客户端携带的 ChatGPT 令牌，访问控制由监听地址或前置代理承担。两种方式的区别和客户端配置见下文“Codex 内置 OpenAI Provider”。
+`--codex` 默认关闭。启用后，`/v1` 仍然校验本地 Bearer Key。`/codex` 入口供 Codex 的内置 OpenAI Provider 使用。这个入口不校验本地 Key 或客户端携带的 ChatGPT 令牌，访问控制由监听地址或前置代理承担。两种方式的区别和客户端配置见下文“Codex 内置 OpenAI Provider”。
 
 建议把官方 Codex 或 CPA 的认证文件复制到专用目录，供 Codex-Pass 的代理和账户命令使用。同一文件的刷新由伴随锁协调。刷新后会原子写回认证文件实际所在的路径，权限为 `0600`。
 
@@ -187,7 +187,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 | Base URL 路径 | 客户端 | 本地认证 | 请求体处理 |
 | --- | --- | --- | --- |
-| `/v1` | 通用 OpenAI 客户端，或 Codex 自定义 Provider | 必须发送 `--key` 指定的 Bearer Key | 保留现有 Responses 兼容改写和 Chat Completions 转换 |
+| `/v1` | 通用 OpenAI 客户端，或 Codex 自定义 Provider | 发送通过 `--key` 或 `CODEXPASS_KEY` 配置的任意一个 Bearer Key | 保留现有 Responses 兼容改写和 Chat Completions 转换 |
 | `/codex` | Codex 内置 `openai` Provider，保持 ChatGPT 登录 | 不要求本地 Key；须由代理启动参数 `--codex` 启用 | 原始请求体按字节转发，不改业务参数 |
 
 在现有启动命令中加入 `--codex` 即可同时提供这两个入口，原来的 Key 和 Auth File 继续使用：
@@ -242,7 +242,7 @@ env_key = "CODEX_PASS_KEY"
 model_catalog_url = "http://127.0.0.1:8317/v1/models"
 ```
 
-将 `CODEX_PASS_KEY` 设为代理启动时的 `--key`。远程连接时，把两个 URL 中的 `127.0.0.1:8317` 换成客户端可访问的代理地址。Codex 会自动附加自己的 `client_version`，无需在配置中手写版本号。把 `api_key_model_discovery = true` 加到已有的 `[features]` 表中，不要重复声明该表：桌面端可能通过运行时设置关闭此开关，显式配置可覆盖该设置；关闭时，配置 `model_catalog_url` 会使模型选择器为空。移除生效的 `model_catalog_json` 配置，因为本地目录覆盖会阻止远程获取。配置机制见 [Codex 官方模型目录说明](https://developers.openai.com/codex/model-catalogs)。修改后重启 Codex。
+将客户端的 `CODEX_PASS_KEY` 设为代理已配置的任意一个 Key。远程连接时，把两个 URL 中的 `127.0.0.1:8317` 换成客户端可访问的代理地址。Codex 会自动附加自己的 `client_version`，无需在配置中手写版本号。把 `api_key_model_discovery = true` 加到已有的 `[features]` 表中，不要重复声明该表：桌面端可能通过运行时设置关闭此开关，显式配置可覆盖该设置；关闭时，配置 `model_catalog_url` 会使模型选择器为空。移除生效的 `model_catalog_json` 配置，因为本地目录覆盖会阻止远程获取。配置机制见 [Codex 官方模型目录说明](https://developers.openai.com/codex/model-catalogs)。修改后重启 Codex。
 
 ## 上游认证与亲和性
 
@@ -263,7 +263,7 @@ model_catalog_url = "http://127.0.0.1:8317/v1/models"
 
 日志会脱敏 Bearer 凭证、`sk-...`、OAuth Access / Refresh / ID Token；脱敏仅发生在日志副本上，绝不会影响上游请求。日志写入由独立协程串行落盘并通过有界队列施加背压，不会静默丢失记录。
 
-`--key` 会出现在进程参数中。实际使用时可限制本机用户权限，或改由受保护的启动器传入。
+通过 `--key` 设置的值会出现在进程参数中。可以从受保护的环境文件中设置 `CODEXPASS_KEY`。
 
 ## 诊断脚本
 

@@ -33,6 +33,25 @@ const transparentRequest = `{
   "input": [{"role": "developer", "content": [{"type": "input_text", "text": "Testing"}]}]
 }`
 
+func TestHealthzReturnsJSON(t *testing.T) {
+	var server Server
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("unexpected health response: status=%d headers=%v", response.Code, response.Header())
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid health response %q: %v", response.Body.String(), err)
+	}
+	if body.Status != "ok" {
+		t.Fatalf("health status = %q, want ok", body.Status)
+	}
+}
+
 func TestStreamingRequestAndSSEAreByteTransparent(t *testing.T) {
 	requestBody := []byte(transparentRequest)
 	expectedSSE := []byte("event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1}}}\n\n")
@@ -699,7 +718,7 @@ func newTestProxyConfigured(t *testing.T, upstream *httptest.Server, refreshEndp
 	if len(requestLogs) == 1 {
 		requestLog = requestLogs[0]
 	}
-	config := Config{APIKey: "sk-local-secret", AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", ModelsUpstreamURL: upstream.URL + "/models", CodexUpstreamURL: upstream.URL, Logger: logger, RequestLog: requestLog}
+	config := Config{APIKeys: []string{"sk-local-secret"}, AuthPool: pool, HTTPClient: upstream.Client(), UpstreamURL: upstream.URL + "/responses", ModelsUpstreamURL: upstream.URL + "/models", CodexUpstreamURL: upstream.URL, Logger: logger, RequestLog: requestLog}
 	if configure != nil {
 		configure(&config)
 	}

@@ -92,7 +92,7 @@ func TestAccountRefreshDoesNotStrandProxy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handler, err := proxy.New(proxy.Config{APIKey: "proxy-key", AuthPool: pool, HTTPClient: client})
+			handler, err := proxy.New(proxy.Config{APIKeys: []string{"proxy-key"}, AuthPool: pool, HTTPClient: client})
 			if err != nil {
 				t.Fatal(err)
 			}

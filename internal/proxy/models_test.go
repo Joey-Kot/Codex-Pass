@@ -151,9 +151,15 @@ func TestModelsRequiresLocalAPIKeyAndGET(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		upstreamCalls.Add(1)
+		if request.Header.Get("Authorization") != "Bearer test-access" {
+			t.Error("proxy did not replace the local key with the upstream access token")
+		}
+		_, _ = io.WriteString(writer, `{"models":[]}`)
 	}))
 	defer upstream.Close()
-	proxyServer, cleanup := newTestProxy(t, upstream, upstream.URL+"/refresh", "")
+	proxyServer, cleanup := newTestProxyConfigured(t, upstream, upstream.URL+"/refresh", "", func(config *Config) {
+		config.APIKeys = []string{"sk-local-secret", "sk-second-local-secret"}
+	})
 	defer cleanup()
 	for _, test := range []struct {
 		name, method, authorization string
@@ -161,6 +167,9 @@ func TestModelsRequiresLocalAPIKeyAndGET(t *testing.T) {
 	}{
 		{"missing key", http.MethodGet, "", http.StatusUnauthorized},
 		{"incorrect key", http.MethodGet, "Bearer incorrect", http.StatusUnauthorized},
+		{"whole list as one key", http.MethodGet, "Bearer sk-local-secret,sk-second-local-secret", http.StatusUnauthorized},
+		{"first key", http.MethodGet, "Bearer sk-local-secret", http.StatusOK},
+		{"second key", http.MethodGet, "bearer sk-second-local-secret", http.StatusOK},
 		{"POST", http.MethodPost, "Bearer sk-local-secret", http.StatusMethodNotAllowed},
 		{"HEAD", http.MethodHead, "Bearer sk-local-secret", http.StatusMethodNotAllowed},
 	} {
@@ -183,8 +192,8 @@ func TestModelsRequiresLocalAPIKeyAndGET(t *testing.T) {
 			}
 		})
 	}
-	if upstreamCalls.Load() != 0 {
-		t.Fatalf("unauthorized or unsupported requests reached upstream %d times", upstreamCalls.Load())
+	if got := upstreamCalls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want one per valid key", got)
 	}
 }
 

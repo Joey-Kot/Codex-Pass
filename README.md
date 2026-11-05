@@ -2,7 +2,7 @@
 
 English | [简体中文](README_ZH.md)
 
-Codex-Pass is a local proxy for ChatGPT-backed Codex models. It uses your existing Codex authentication files to serve OpenAI-compatible Responses and Chat Completions clients, or to route the official Codex client through its built-in OpenAI provider. It also forwards standalone web search and Codex image generation and editing. It handles upstream token refresh and account affinity, with optional debug logs and SQLite usage reports.
+Codex-Pass is a local proxy that uses ChatGPT credentials to access Codex models. It serves OpenAI-compatible Responses and Chat Completions clients and supports the official Codex client through its built-in OpenAI provider. It forwards standalone web search, image generation, and image editing requests and refreshes credentials automatically. The CLI can check weekly quotas, list and redeem reset credits, inspect account model catalogs, and build usage reports from SQLite logs.
 
 ## Downloads
 
@@ -17,45 +17,40 @@ Codex-Pass is a local proxy for ChatGPT-backed Codex models. It uses your existi
 
 ## Usage
 
-### Start the proxy
+### API routes
 
-Copy a Codex authentication file to a dedicated location, then start the proxy:
+Both base URLs can run in the same proxy. Codex-Pass uses its configured auth files for upstream requests on either route.
 
-```bash
-./codex-pass --key sk-local-secret --codexpass-sqlite ./usage /path/to/copied-auth.json
-```
+| Base URL | Use it with | Access |
+| --- | --- | --- |
+| `http://127.0.0.1:8317/v1` | OpenAI-compatible clients and Codex custom providers | Send one of the local Bearer keys configured with `--key` or `CODEXPASS_KEY`. |
+| `http://127.0.0.1:8317/codex` | Codex with its built-in OpenAI provider and ChatGPT login | Enable direct client access with `--codex`. |
 
-The default listen address is `127.0.0.1:8317`. On Windows, use `codex-pass.exe` with the same arguments. All proxy options must appear before the authentication file paths; multiple files are supported.
+#### OpenAI-compatible clients (`/v1`)
 
-`--key` and at least one authentication file are required. Pass file paths as arguments or set `CODEXPASS_AUTH_FILE`. Official Codex files and supported CPA flattened files are accepted. Use a writable copy of each auth file and share its path across Codex-Pass commands. Codex-Pass coordinates refreshes through a sibling lock file with the `.codex-pass.lock` suffix and atomically writes refreshed tokens to the resolved auth file, so its parent directory must be writable.
+Set your client's base URL to `http://127.0.0.1:8317/v1` and its API key to one of the proxy's configured keys.
 
-### Choose a client route
-
-Both routes can run in the same process:
-
-| Base URL | Clients | Local authentication | Request handling |
-| --- | --- | --- | --- |
-| `http://127.0.0.1:8317/v1` | OpenAI-compatible clients and Codex custom providers | Bearer token matching `--key` | Responses compatibility adjustments and Chat Completions conversion |
-| `http://127.0.0.1:8317/codex` | Official Codex with its built-in OpenAI provider and ChatGPT login | No local Key check; enabled with `--codex` | Original request body forwarded byte for byte |
-
-The `/codex` route is disabled by default. When enabled, it does not validate the client's ChatGPT token; restrict access through the listen address or a front-end proxy. The `/v1` route continues to require its Key. Both routes use the proxy's authentication files for upstream requests.
-
-#### OpenAI-compatible clients: `/v1`
-
-Set the client's Base URL to `http://127.0.0.1:8317/v1` and its API Key to the value passed to `--key`.
+| Method and path | Purpose |
+| --- | --- |
+| `POST /v1/responses` | Send Responses API requests with compatibility adjustments for the Codex upstream. Supports streaming SSE and a single JSON response. |
+| `POST /v1/chat/completions` | Send Chat Completions requests. The proxy converts `messages` to Responses input and converts the result back to Chat Completions format. |
+| `GET /v1/models` | Fetch the upstream Codex model catalog, including model instructions and capabilities. The JSON uses the Codex catalog schema. |
 
 ```bash
+curl http://127.0.0.1:8317/v1/responses \
+  -H 'Authorization: Bearer sk-local-secret' \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"gpt-6-luna","input":"Hello"}'
+
 curl http://127.0.0.1:8317/v1/chat/completions \
   -H 'Authorization: Bearer sk-local-secret' \
   -H 'Content-Type: application/json' \
   --data '{"model":"gpt-6-luna","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-The proxy also exposes `POST /v1/responses` with streaming and non-streaming output. `GET /v1/models` returns the full Codex model catalog, including capabilities and instructions; it is not the public OpenAI model-list format.
+Set `stream` to `true` in either inference request to receive SSE events as they arrive.
 
-Model catalog requests default a missing or empty `client_version` to `0.166.0`. Explicit versions and other query parameters retain their original encoding, order, and repeated values. This also applies to `/codex/models` when enabled.
-
-For a Codex custom provider, add the following to the user-level `~/.codex/config.toml` and make `CODEX_PASS_KEY` available to the Codex process:
+For a Codex custom provider, set `CODEX_PASS_KEY` in the Codex client's environment to one of the proxy's configured keys. In `~/.codex/config.toml`, place `model_provider` before the first TOML table and merge `api_key_model_discovery` into the existing `[features]` table if present.
 
 ```toml
 model_provider = "codex_pass"
@@ -72,147 +67,262 @@ model_catalog_url = "http://127.0.0.1:8317/v1/models"
 supports_standalone_web_search = true
 ```
 
-Merge the feature setting into an existing `[features]` table if present. Explicitly enable `api_key_model_discovery`: the desktop client can disable it through runtime defaults.
+#### Codex built-in OpenAI provider (`/codex`)
 
-#### Codex built-in OpenAI provider: `/codex`
-
-Add `--codex` to the proxy's startup command to enable the dedicated route alongside `/v1`:
-
-```bash
-./codex-pass --key sk-local-secret --codex --codexpass-sqlite ./usage /path/to/copied-auth.json
-```
-
-Keep Codex signed in with ChatGPT. Set these top-level values before the first TOML table in the user-level `~/.codex/config.toml`:
+Start the proxy with `--codex` and keep the Codex client signed in with ChatGPT. Put these values before the first TOML table in `~/.codex/config.toml`.
 
 ```toml
 model_provider = "openai"
 openai_base_url = "http://127.0.0.1:8317/codex"
 ```
 
-Codex automatically fetches `/codex/models` and sends inference requests to `/codex/responses`. No custom provider definition, `env_key`, or `model_catalog_url` is needed for this route. Automatic discovery here requires ChatGPT login; API Key clients should use `/v1`.
+| Method and path | Purpose |
+| --- | --- |
+| `POST /codex/responses` | Forward native Codex inference requests. The proxy preserves the original request bytes and supports zstd compression. WebSocket probes receive HTTP 426 so Codex can switch to HTTP/SSE. |
+| `GET /codex/models` | Let the built-in provider discover its model catalog automatically. |
 
-The dedicated route preserves all request fields, including unknown fields, and supports Codex's zstd compression. An inspection copy supplies log metadata and usage accounting; the original wire bytes are forwarded and reused on retries. The request body limit is 128 MiB, applied separately to the received and decompressed bodies. WebSocket connection probes switch the client to HTTP/SSE immediately.
+The request body limit is 128 MiB, applied separately to the received and decompressed bodies.
 
-For either Codex configuration, remove any effective `model_catalog_json` override so remote discovery can run, then restart Codex. For remote clients, replace `127.0.0.1:8317` with an address reachable from the client. See the official [base URL configuration](https://learn.chatgpt.com/docs/config-file/config-advanced) and [model catalog documentation](https://learn.chatgpt.com/docs/model-catalogs).
+For either Codex setup, remove any active `model_catalog_json` override and restart the client to use remote discovery. For remote clients, use the proxy address reachable by the client. Both model catalog endpoints use `0.166.0` when `client_version` is absent or empty and preserve explicit versions and other query parameters. [Base URL configuration](https://learn.chatgpt.com/docs/config-file/config-advanced) · [Model catalogs](https://learn.chatgpt.com/docs/model-catalogs)
 
-### Web search and images
+#### Web Search
 
-Codex uses separate endpoints for these hosted tools:
+Use `POST /v1/alpha/search` or `POST /codex/alpha/search` to fetch web search results as a standalone tool call. Send search queries in `commands.search_query`. For automatic calls from Codex, the client and selected model must support standalone search, and the configured search mode must allow it. The custom provider above advertises `supports_standalone_web_search = true`. [Codex search request schema](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/codex-api/src/search.rs)
 
-| Operation | Custom provider / API Key route | Built-in provider route |
+```bash
+curl http://127.0.0.1:8317/v1/alpha/search \
+  -H 'Authorization: Bearer sk-local-secret' \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<'JSON'
+{
+  "id": "d95493fa-2a91-4e1e-a1b1-934bca0fb441",
+  "model": "gpt-6.1-sol",
+  "commands": {"search_query": [{"q": "Go context package", "domains": ["go.dev"]}]},
+  "settings": {"external_web_access": true}
+}
+JSON
+```
+
+#### Image Generation
+
+Use `POST /v1/images/generations` or `POST /codex/images/generations` to create an image from a text prompt. Send a Codex image model and a `prompt` in the JSON body. The upstream can return image data in `data[].b64_json`.
+
+```bash
+curl http://127.0.0.1:8317/v1/images/generations \
+  -H 'Authorization: Bearer sk-local-secret' \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"gpt-image-2","prompt":"A red fox in a snowy forest"}'
+```
+
+#### Image Editing
+
+Use `POST /v1/images/edits` or `POST /codex/images/edits` to modify a reference image. Send Codex JSON with the edit instruction in `prompt` and the input image in the `images` array. This example reads `reference.png` from the current directory and sends it as a data URL.
+
+```bash
+curl http://127.0.0.1:8317/v1/images/edits \
+  -H 'Authorization: Bearer sk-local-secret' \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<EOF
+{
+  "model": "gpt-image-2",
+  "prompt": "Add a red scarf to the fox",
+  "images": [
+    {"image_url": "data:image/png;base64,$(base64 < reference.png | tr -d '\r\n')"}
+  ]
+}
+EOF
+```
+
+Search, generation, and editing follow the authentication rules for their route prefix. Codex-Pass forwards the Codex JSON bodies as received. When SQLite logging is enabled, it records token counts supplied by the upstream.
+
+#### Health check (`GET /healthz`)
+
+Use an unauthenticated `GET /healthz` for a local liveness probe. The proxy returns HTTP 200 with `{"status":"ok"}` when its HTTP listener is responding.
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8317/healthz
+```
+
+### Start from the command line
+
+Use writable copies of official Codex ChatGPT auth files or supported CPA Codex auth files. Configure at least one local API key with `--key` or `CODEXPASS_KEY`. Put auth file paths after the options when supplying them on the command line. On Windows, use `codex-pass.exe` with the same arguments.
+
+```bash
+./codex-pass --key sk-local-secret /path/to/copied-auth.json
+```
+
+To enable `/codex` alongside `/v1` and write both logs, use the following command.
+
+```bash
+./codex-pass \
+  --key sk-local-secret \
+  --listen 127.0.0.1:8317 \
+  --codex \
+  --codexpass-sqlite ./usage \
+  --codexpass-debug ./proxy.jsonl \
+  /path/to/copied-auth.json
+```
+
+The proxy and account commands coordinate token refresh through a sibling lock file with the `.codex-pass.lock` suffix. They atomically update the resolved auth file, so its parent directory must be writable.
+
+### Environment variables
+
+| Variable | Applies to | Purpose |
 | --- | --- | --- |
-| Web search | `POST /v1/alpha/search` | `POST /codex/alpha/search` |
-| Image generation | `POST /v1/images/generations` | `POST /codex/images/generations` |
-| Image editing | `POST /v1/images/edits` | `POST /codex/images/edits` |
+| `CODEXPASS_KEY` | Proxy | One local Bearer key or a comma-separated list of keys. |
+| `CODEXPASS_AUTH_FILE` | Proxy, `quota`, `reset`, `models` | Default auth file paths. Separate multiple paths with `:` on Linux and macOS or `;` on Windows. |
+| `CODEXPASS_SQLITE` | Proxy, `sum`, `req` | Directory containing `codex-pass.sqlite`. The proxy writes the database and the report commands query it. |
+| `CODEXPASS_DEBUG` | Proxy | Path to the JSON Lines debug log. |
+| `CODEX_PROXY_LISTEN` | Proxy | Listen address when `--listen` is omitted. Defaults to `127.0.0.1:8317`. |
 
-These endpoints forward the Codex JSON request and response bodies unchanged, including reference image data and tool metadata. Image editing accepts Codex's JSON image-input format. The `/v1` routes require the proxy Key; the `/codex` routes require `--codex` to be enabled. For standalone search with a custom provider, advertise `supports_standalone_web_search = true`; the client runtime, model, and configured search mode must also enable the tool.
+Command-line paths take precedence. Explicit auth file arguments replace the whole environment list for that invocation. Repeated references to the same file are processed once in first-seen order. In proxy mode, `--codexpass-sqlite=` or `--codexpass-debug=` disables the corresponding log for that run.
 
-Tool requests use the same upstream authentication files, refresh/retry behavior, debug logs, and SQLite accounting as inference requests. Returned token usage is recorded when present; missing usage remains unknown. Search and image responses are JSON, so they are not parsed as inference SSE streams.
+`--key` accepts the same comma-separated syntax and replaces the entire `CODEXPASS_KEY` list for that run.
 
-### Commands and options
+```bash
+export CODEXPASS_KEY='sk-local-secret,sk-second-local-secret'
+export CODEXPASS_AUTH_FILE='/path/to/first.json:/path/to/second.json'
+export CODEXPASS_SQLITE=./usage
+export CODEXPASS_DEBUG=./proxy.jsonl
+./codex-pass --codex
+```
+
+### Run with systemd
+
+Install a build that supports `CODEXPASS_KEY` and create the configuration directory. Linux packages include the service unit and environment template below. [systemd files](examples/systemd)
+
+```bash
+sudo install -m 0755 codex-pass /usr/local/bin/codex-pass
+sudo install -d -m 0755 /etc/codex-pass
+```
+
+Save this unit as `/etc/systemd/system/codex-pass.service`. It runs as `root` to access the files under `/root`.
+
+```ini
+[Unit]
+Description=Codex Pass Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=3s
+EnvironmentFile=/etc/codex-pass/codex-pass.env
+ExecStart=/usr/local/bin/codex-pass --codex
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save the following as `/etc/codex-pass/codex-pass.env` with permissions `0600`. Replace `sk-xxx` with your local API key. The proxy writes refreshed tokens back to `CODEXPASS_AUTH_FILE`.
+
+```ini
+CODEX_PROXY_LISTEN="0.0.0.0:8317"
+CODEXPASS_SQLITE="/root/codex-log"
+CODEXPASS_AUTH_FILE="/root/.codex/auth.json"
+CODEXPASS_KEY="sk-xxx"
+```
+
+Once the service is running, LAN clients can use `http://<server-address>:8317/codex` as their base URL.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex-pass
+systemctl status codex-pass
+journalctl -u codex-pass -f
+```
+
+For a service that is already running, use `sudo systemctl restart codex-pass` after reloading the unit to apply the changes.
+
+### Subcommand examples
+
+#### SQLite reports
+
+`sum` aggregates request outcomes and token usage. `req` displays request counts and individual records. Both query an existing SQLite directory supplied with `--codexpass-sqlite` or `CODEXPASS_SQLITE`.
+
+```bash
+./codex-pass sum --codexpass-sqlite ./usage --time 1w --human
+./codex-pass req --codexpass-sqlite ./usage --time 1d --models gpt-6-astra,gpt-6-luna --num 20
+CODEXPASS_SQLITE=./usage ./codex-pass req --asc --num 10 --price ./prices.example.json
+```
+
+For `req`, time and model filters apply before sorting and limiting. The request counts, rows, and estimated costs all use the selected records. SQLite stores request metadata and usage. The separate debug log also contains request and response bodies with credential redaction.
+
+#### Account queries and resets
+
+These commands query ChatGPT directly. Pass auth files as arguments or use `CODEXPASS_AUTH_FILE`. The `reset` examples below use the environment variable.
+
+```bash
+./codex-pass quota /path/to/copied-auth.json
+./codex-pass reset
+./codex-pass reset 1
+./codex-pass models --client-version 0.166.0 /path/to/copied-auth.json
+```
+
+- `quota` lists weekly usage, remaining quota, and the next reset time by auth file.
+- `reset` shows the available credit count and a single table with auth file names and expiration times. Numbering and redemption require complete credit details. Credits are numbered from `1` in file order, with the oldest grants first within a file. `reset N` shows the selected credit and asks for `[y/N]` confirmation. Only `y` or `Y` redeems it. Press Enter to cancel.
+- `models` shows separate Codex and ChatGPT catalogs for each auth file and includes hidden Codex entries. The ChatGPT catalog identifies models that advertise the image tool. The command lists `gpt-image-2` separately as the built-in image tool's default model. Tool access depends on the account. [Codex image generation](https://learn.chatgpt.com/docs/image-generation)
+
+### Command and option reference
 
 ```text
-codex-pass [options] --key KEY [--codex] [AUTH_FILE ...]
-codex-pass sum [--codexpass-sqlite DIR] [report options]
-codex-pass req [--codexpass-sqlite DIR] [report options] [--asc | --desc] [--num N] [--models MODEL[,MODEL...]]
+codex-pass [--key KEY[,KEY...]] [--listen ADDRESS] [--codex] [--codexpass-sqlite DIR] [--codexpass-debug FILE] [AUTH_FILE ...]
+codex-pass [REPORT_OPTIONS] sum [REPORT_OPTIONS]
+codex-pass [REPORT_OPTIONS] req [REPORT_OPTIONS] [--asc | --desc] [--num N] [--models MODEL[,MODEL...]]
 codex-pass quota [AUTH_FILE ...]
 codex-pass reset [N] [AUTH_FILE ...]
 codex-pass models [--client-version VERSION] [AUTH_FILE ...]
+codex-pass [COMMAND] --help
 ```
 
-| Option | Scope | Description |
+| Option or argument | Applies to | Usage |
 | --- | --- | --- |
-| `--key KEY` | Proxy | Required Bearer Key for `/v1`; remains required when `--codex` is enabled. |
-| `--listen ADDRESS` | Proxy | Listen address; overrides `CODEX_PROXY_LISTEN`. Defaults to `127.0.0.1:8317`. |
-| `--codex` | Proxy | Enable Codex-specific inference, model catalog, search, and image routes. Disabled by default. |
-| `--codexpass-debug FILE` | Proxy | Write redacted JSON Lines debug logs to `FILE`. Defaults to `CODEXPASS_DEBUG`. |
-| `--codexpass-sqlite DIR` | Proxy and reports | Write or query `DIR/codex-pass.sqlite`. Defaults to `CODEXPASS_SQLITE`. `sum` and `req` require a directory from either source. |
-| `--time RANGE` | Reports | Filter by request start time. Defaults to all recorded requests. |
-| `--human` | Reports | Format counts and tokens with compact K/M/B units. |
-| `--price FILE` | Reports | Estimate costs using a JSON price table. See [prices.example.json](prices.example.json). |
-| `--asc` / `--desc` | `req` | Sort oldest or newest first. Default: newest first. Mutually exclusive. |
-| `--num N` | `req` | Limit the report to a positive number of requests after filtering and sorting. |
-| `--models MODEL[,MODEL...]` | `req` | Filter by one or more exact stored model names before sorting and applying `--num`. |
-| `--help` | Any command | Show command-specific help. |
+| `--key KEY[,KEY...]` | Proxy | Set one or more local Bearer keys and override `CODEXPASS_KEY`. The proxy requires at least one key even when `--codex` is enabled. |
+| `--listen ADDRESS` | Proxy | Set the listen address, for example `127.0.0.1:8317`. Overrides `CODEX_PROXY_LISTEN`. |
+| `--codex` | Proxy | Enable the `/codex` routes. Off by default. |
+| `--codexpass-sqlite DIR` | Proxy, `sum`, `req` | Store or query `DIR/codex-pass.sqlite`. Reports require a directory from this option or `CODEXPASS_SQLITE`. |
+| `--codexpass-debug FILE` | Proxy | Write the JSON Lines debug log to `FILE`. Overrides `CODEXPASS_DEBUG`. |
+| `--time RANGE` | `sum`, `req` | Filter by request start time. By default, include all recorded times. |
+| `--human` | `sum`, `req` | Format counts and token totals with compact K/M/B units. |
+| `--price FILE` | `sum`, `req` | Estimate costs using a JSON price table. [Example price table](prices.example.json) |
+| `--asc` | `req` | Show oldest requests first. |
+| `--desc` | `req` | Show newest requests first. This is the default. |
+| `--num N` | `req` | Limit results to a positive number of requests after filtering and sorting. By default, show all matches. |
+| `--models MODEL[,MODEL...]` | `req` | Match one or more exact stored model names. |
+| `--client-version VERSION` | `models` | Set the version sent to the Codex catalog endpoint. Defaults to `0.166.0`. |
+| `--help` | All commands | Show help for the selected command. |
+| `AUTH_FILE ...` | Proxy, `quota`, `reset`, `models` | Auth file paths. Supply these after the options, or set `CODEXPASS_AUTH_FILE`. |
+| `N` | `reset` | Positive credit number from the current list. Omit it to list credits. |
 
-Use the `--option` form for all options. Command-line paths override their environment variables. Common options (`--codexpass-sqlite`, `--time`, `--human`, and `--price`) can appear before or after `sum` or `req`. Request-specific options belong after `req`. Report commands do not start the proxy or require credentials.
+Use GNU-style long options. Pass values as `--option VALUE` or `--option=VALUE`. Boolean switches also accept `=true` or `=false`. The report options `--codexpass-sqlite`, `--time`, `--human`, and `--price` can appear before or after `sum` or `req`. Put request-specific options after `req`, and choose at most one of `--asc` and `--desc`.
 
-```bash
-./codex-pass sum --codexpass-sqlite ./usage --time 1h --human
-./codex-pass req --codexpass-sqlite ./usage --time 1d --num 20
-./codex-pass req --codexpass-sqlite ./usage --asc --num 10 --price ./prices.example.json
-CODEXPASS_SQLITE=./usage ./codex-pass req --models gpt-6-astra,gpt-6-luna --num 20
-./codex-pass req --help
-```
+`--time` accepts relative ranges such as `2m`, `1h`, `2d`, `1w`, `3M`, and `1y`. Units are minutes (`m`), hours (`h`), 24-hour days (`d`), 7-day weeks (`w`), calendar months (`M`), and calendar years (`y`). Use `YYYY-MM-DD,YYYY-MM-DD` for local dates or `YYYY-MM-DD-HH-MM,YYYY-MM-DD-HH-MM` for local times. The range includes the final date or minute.
 
-Time ranges accept durations such as `2m`, `1h`, `2d`, `1w`, `3M`, and `1y`, or inclusive local date ranges such as `2026-10-01,2026-10-28`. Use `YYYY-MM-DD-HH-MM,YYYY-MM-DD-HH-MM` for minute precision. Lowercase `m` means minutes; uppercase `M` means calendar months.
+## Build from source
 
-Usage reports include request outcomes, model names, reasoning effort, and token counts returned by the upstream. `req` uses the filtered requests for both tables and the price total. Missing usage remains unknown. SQLite stores metadata rather than prompts or credentials; detailed debug logs include request and response content.
-
-### Account quota, resets, and models
-
-Pass one or more Codex or CPA authentication files on the command line, or set `CODEXPASS_AUTH_FILE` to supply the default paths for account commands and proxy startup. Use `:` between paths on Linux and macOS and `;` on Windows. Explicit paths replace the environment list for that invocation. Repeated references to the same file are counted once, at the position of the first supplied path. Account commands contact ChatGPT directly using the proxy's token refresh behavior.
+Use the Go version declared in `go.mod`. The build uses pure Go for SQLite and compression. [Go module](go.mod)
 
 ```bash
-export CODEXPASS_AUTH_FILE='/path/to/first.json:/path/with spaces/second.json'
-./codex-pass quota
-./codex-pass reset
-./codex-pass reset 2
-./codex-pass models /path/to/another.json /path/to/fourth.json
+git clone https://github.com/Joey-Kot/Codex-Pass.git
+cd Codex-Pass
+CGO_ENABLED=0 go build -trimpath -o codex-pass ./cmd/codex-pass
 ```
 
-- `quota` groups results by auth file and shows the percentage used, percentage remaining, and next reset time for each weekly quota window.
-- `reset` shows the total available reset count and one table with the number, auth file name, and expiration time for each listed credit. Numbers start at `1` and follow the order of the supplied files, oldest grants first within each file. Numbering and redemption require complete credit details for every selected file. `reset N` fetches the current lists before showing the selected file and credit for `[y/N]` confirmation. Only `y` or `Y` redeems that credit. Enter, unrecognized input, and closed stdin cancel the operation. Times use the machine's local timezone.
-- `models` groups results by auth file, with separate Codex and ChatGPT catalogs for each account. The Codex catalog includes hidden entries. Use `--client-version VERSION` to request a different Codex catalog version. The ChatGPT catalog shows which models advertise the image tool. The separate `gpt-image-2` entry documents the default model for Codex's built-in image tool. Access to that tool depends on the account's plan and workspace. [OpenAI image generation documentation](https://learn.chatgpt.com/docs/image-generation)
-
-### Build from source
-
-Use the Go version specified in [go.mod](go.mod). No CGO or system SQLite library is required.
+On Windows, build with `go build -trimpath -o codex-pass.exe ./cmd/codex-pass`. To verify the source, run these checks.
 
 ```bash
 go test ./...
 go test -race ./...
 go vet ./...
-CGO_ENABLED=0 go build -trimpath -o codex-pass ./cmd/codex-pass
 ```
 
-The [GitHub Actions workflow](.github/workflows/build.yml) tests the project and builds all six target packages on pushes to `main`, pull requests, and manual runs. Successful pushes and manual runs on `main` update the `Latest` release used by the download links above. Pushing a `v*` tag publishes a separate versioned release. Each release includes individual `.sha256` files and a combined `SHA256SUMS` file.
-
-The same packaging script can run locally; use `linux`, `darwin`, or `windows` with `amd64` or `arm64`:
+To produce a release archive locally, run the packaging script with a target OS and architecture. Supported targets are `linux`, `darwin`, and `windows` with `amd64` or `arm64`. The GitHub Actions workflow uses the same packaging script. [Release workflow](.github/workflows/build.yml)
 
 ```bash
 ./scripts/package.sh linux amd64 v1.0.0
 ```
 
-Linux and macOS packages use `.tar.gz`; Windows packages use `.zip`. Packages include the executable, documentation, MIT license, and example price table. Linux packages also include the systemd examples. The previous detailed README is preserved in [Agents.md](Agents.md).
-
-## Run with systemd
-
-An example unit and environment file are provided in [examples/systemd](examples/systemd). The service runs as a dedicated user, stores credentials and usage data under `/var/lib/codex-pass`, and reads its settings from `/etc/codex-pass/codex-pass.env`.
-
-Run these commands from the repository or an extracted Linux package, replacing the authentication file path:
-
-```bash
-sudo install -m 0755 codex-pass /usr/local/bin/codex-pass
-sudo useradd --system --home-dir /var/lib/codex-pass --shell /usr/sbin/nologin codex-pass
-sudo install -d -m 0755 /etc/codex-pass
-sudo install -d -m 0700 -o codex-pass -g codex-pass /var/lib/codex-pass
-sudo install -m 0600 -o codex-pass -g codex-pass /path/to/copied-auth.json /var/lib/codex-pass/auth.json
-sudo install -m 0600 examples/systemd/codex-pass.env.example /etc/codex-pass/codex-pass.env
-sudoedit /etc/codex-pass/codex-pass.env
-sudo install -m 0644 examples/systemd/codex-pass.service /etc/systemd/system/codex-pass.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now codex-pass
-```
-
-Set `CODEX_PASS_KEY` before starting the service. The example listens on loopback and leaves the Codex-specific route disabled; set `CODEX_PASS_CODEX=true` to enable it. Credentials remain writable for automatic refresh.
-
-```bash
-systemctl status codex-pass
-journalctl -u codex-pass -f
-curl http://127.0.0.1:8317/healthz
-```
-
 ## License
 
-Released under the [MIT License](LICENSE).
+Codex-Pass is licensed under MIT. [Full license text](LICENSE)
